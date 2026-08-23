@@ -82,6 +82,27 @@ otadump ota.zip
 otadump payload.bin
 ```
 
+### Python
+
+Build and install the native Python module with `pip` or
+[maturin](https://www.maturin.rs/), then call `otadump.extract`:
+
+```python
+from pathlib import Path
+
+import otadump
+
+otadump.extract(
+    Path("payload.bin"),
+    Path("output"),
+    partitions=["boot", "system"],
+    overwrite=True,
+)
+```
+
+The optional keyword arguments are `num_threads`, `overwrite`, `partitions`,
+and `verify`. Extraction releases the Python GIL.
+
 ## Contributors
 
 - [Kartik Sharma][crazystylus]

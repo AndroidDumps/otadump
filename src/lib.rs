@@ -4,6 +4,8 @@ mod chromeos_update_engine {
     include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
 }
 mod payload;
+#[cfg(feature = "python")]
+mod python;
 
 use std::cmp::Reverse;
 use std::collections::HashSet;

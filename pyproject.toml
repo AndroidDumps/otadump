@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "otadump"
+dynamic = ["version"]
+description = "Extract partitions from Android OTA files"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+    { name = "Kartik Sharma", email = "kartik.sharma522@gmail.com" },
+    { name = "Ajeet D'Souza", email = "98ajeet@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+]
+
+[tool.maturin]
+features = ["python"]
