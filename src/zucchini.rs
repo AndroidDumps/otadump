@@ -1,8 +1,8 @@
 use std::error;
 use std::fmt;
 
-#[cfg(otadump_zucchini)]
-const OFFSET_BOUND: usize = (u32::MAX / 2) as usize;
+/// Exclusive upper bound for buffers represented by Zucchini offsets.
+pub const OFFSET_BOUND: usize = (u32::MAX / 2) as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
@@ -52,6 +52,12 @@ fn apply_impl(old: &[u8], patch: &[u8], output_size: usize) -> Result<Vec<u8>> {
         return Err(Error {
             status: Status::InvalidArgument,
             message: "image exceeds Zucchini offset bound".into(),
+        });
+    }
+    if patch.len() >= OFFSET_BOUND {
+        return Err(Error {
+            status: Status::InvalidArgument,
+            message: "patch exceeds Zucchini offset bound".into(),
         });
     }
 

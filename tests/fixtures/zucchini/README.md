@@ -20,3 +20,13 @@ The target changes one same-length string while preserving both code references.
 `dex-large-unsafe16.zuc` changes reference-delta entry 5 from encoded zero to encoded `+2`.
 This resolves the 16-bit writer to the existing jumbo target at index 65,536 and must fail in preflight.
 The expected bytes are stored independently and are not constructed by the adapter tests.
+
+The `*.zuc.br` files wrap the matching serialized patches with Brotli.
+They were created offline with the independent Brotli 1.2.0 command-line compressor:
+
+```sh
+brotli --quality=9 --lgwin=20 --stdout input.zuc > input.zuc.br
+```
+
+`malformed-zucchini.zuc.br` is the same Brotli encoding of the ASCII bytes `not a zucchini patch`.
+`malformed-brotli.zuc.br` contains the ASCII bytes `not a Brotli stream` followed by a newline and is intentionally not a Brotli stream.

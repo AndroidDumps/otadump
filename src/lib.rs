@@ -21,6 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::{error, result, slice, thread};
 
 use anyhow::{Context as _, Error, Result, bail, ensure};
+use brotli::Decompressor as BrotliDecoder;
 use bsdiff_android::patch_bsdf2;
 use bzip2::read::BzDecoder;
 use chromeos_update_engine::install_operation::Type;
@@ -41,6 +42,7 @@ pub use crate::payload::Payload;
 // The chunk size is the number of bytes we verify before we count one "tick" in
 // the progress tracker.
 const VERIFY_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+const BROTLI_DECODE_CHUNK_SIZE: usize = 32 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken {
@@ -897,6 +899,10 @@ impl Task<'_> {
                 let patch = self.extract_data(op).context("Error extracting BROTLI_BSDIFF data")?;
                 self.run_op_bsdiff(op, patch, "BROTLI_BSDIFF", &mut dst_extents)
             }
+            Type::Zucchini => {
+                let patch = self.extract_data(op).context("Error extracting ZUCCHINI data")?;
+                self.run_op_zucchini(op, patch, &mut dst_extents)
+            }
             Type::Zero | Type::Discard => {
                 for extent in dst_extents {
                     for chunk in extent.chunks_mut(VERIFY_CHUNK_SIZE) {
@@ -918,7 +924,8 @@ impl Task<'_> {
         let source = self.source.as_ref().context("Source partition was not opened")?;
         let ranges = extent_ranges(&op.src_extents, self.block_size, source.len)?;
         let capacity = ranges_len(&ranges)?;
-        let mut data = Vec::with_capacity(capacity);
+        let mut data = Vec::new();
+        data.try_reserve_exact(capacity).context("Unable to allocate source extent buffer")?;
         for range in ranges {
             for chunk in source.bytes()[range].chunks(VERIFY_CHUNK_SIZE) {
                 self.cancellation_token.check()?;
@@ -948,6 +955,33 @@ impl Task<'_> {
             .context("Unable to allocate patched output buffer")?;
         patch_bsdf2(&source, patch, &mut output)
             .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
+        self.cancellation_token.check()?;
+        self.write_exact(&output, dst_extents)
+    }
+
+    fn run_op_zucchini(
+        &self,
+        op: &InstallOperation,
+        compressed_patch: &[u8],
+        dst_extents: &mut [&mut [u8]],
+    ) -> Result<()> {
+        let source_partition = self.source.as_ref().context("Source partition was not opened")?;
+        let source_ranges = extent_ranges(&op.src_extents, self.block_size, source_partition.len)?;
+        let source_len = ranges_len(&source_ranges)?;
+        ensure!(
+            source_len < zucchini::OFFSET_BOUND,
+            "ZUCCHINI source exceeds the maximum size of {} bytes",
+            zucchini::OFFSET_BOUND - 1
+        );
+        let source = self.extract_source_data(op)?;
+        let expected_output_len = dst_extents.iter().try_fold(0usize, |len, extent| {
+            len.checked_add(extent.len()).context("Combined destination length overflow")
+        })?;
+        self.cancellation_token.check()?;
+        let patch = decode_zucchini_patch(compressed_patch, self.cancellation_token)?;
+        self.cancellation_token.check()?;
+        let output = zucchini::apply(&source, &patch, expected_output_len)
+            .map_err(|error| anyhow::anyhow!("ZUCCHINI apply failed: {error}"))?;
         self.cancellation_token.check()?;
         self.write_exact(&output, dst_extents)
     }
@@ -1038,6 +1072,52 @@ impl Task<'_> {
     fn increment_progress(&self) {
         increment_progress(self.total_ops, self.total_ops_completed, self.progress_reporter);
     }
+}
+
+fn decode_zucchini_patch(
+    compressed_patch: &[u8],
+    cancellation_token: &CancellationToken,
+) -> Result<Vec<u8>> {
+    cancellation_token.check()?;
+    let mut decoder = BrotliDecoder::new(compressed_patch, BROTLI_DECODE_CHUNK_SIZE);
+    let mut patch = Vec::new();
+    let mut chunk = [0u8; BROTLI_DECODE_CHUNK_SIZE];
+    let maximum_size = zucchini::OFFSET_BOUND - 1;
+
+    loop {
+        cancellation_token.check()?;
+        let remaining = maximum_size
+            .checked_sub(patch.len())
+            .context("Decoded ZUCCHINI patch length exceeded its bound")?;
+        let read_len = chunk.len().min(remaining.saturating_add(1));
+        let count = decoder
+            .read(&mut chunk[..read_len])
+            .context("Unable to decode ZUCCHINI Brotli patch")?;
+        if count == 0 {
+            cancellation_token.check()?;
+            // The decoder reports buffered trailing input only on a read after
+            // EOF. The source check also catches trailing bytes it did not read.
+            let mut trailing = [0u8; 1];
+            let trailing_count =
+                decoder.read(&mut trailing).context("Unable to decode ZUCCHINI Brotli patch")?;
+            ensure!(
+                trailing_count == 0 && decoder.get_ref().is_empty(),
+                "ZUCCHINI Brotli patch contains trailing data"
+            );
+            break;
+        }
+        ensure!(
+            count <= remaining,
+            "Decoded ZUCCHINI patch exceeds the maximum size of {maximum_size} bytes"
+        );
+        let new_len =
+            patch.len().checked_add(count).context("Decoded ZUCCHINI patch length overflow")?;
+        patch.try_reserve(count).context("Unable to allocate decoded ZUCCHINI patch buffer")?;
+        patch.extend_from_slice(&chunk[..count]);
+        debug_assert_eq!(patch.len(), new_len);
+    }
+
+    Ok(patch)
 }
 
 fn verify_partition(

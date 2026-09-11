@@ -118,6 +118,116 @@ fn assert_zucchini_fixture(name: &str, extension: &str) {
     assert_eq!(output, expected);
 }
 
+#[cfg(otadump_zucchini)]
+fn assert_zucchini_extraction(name: &str, extension: &str) {
+    let fixtures = Path::new(ZUCCHINI_FIXTURES);
+    let old = fs::read(fixtures.join(format!("{name}-old{extension}"))).unwrap();
+    let target = fs::read(fixtures.join(format!("{name}-new{extension}"))).unwrap();
+    let patch = fs::read(fixtures.join(format!("{name}.zuc.br"))).unwrap();
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+
+    let old_split = old.len() / 2;
+    let mut source = Vec::with_capacity(old.len() + 1);
+    source.extend_from_slice(&old[..old_split]);
+    source.push(0xa5);
+    source.extend_from_slice(&old[old_split..]);
+    fs::write(source_dir.join("system.img"), &source).unwrap();
+
+    let target_split = target.len() / 2;
+    let mut expected = Vec::with_capacity(target.len() + 1);
+    expected.extend_from_slice(&target[..target_split]);
+    expected.push(0);
+    expected.extend_from_slice(&target[target_split..]);
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(1),
+        minor_version: Some(8),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(&source)),
+            new_partition_info: Some(partition_info(&expected)),
+            operations: vec![InstallOperation {
+                operation_type: 11,
+                data_offset: Some(0),
+                data_length: Some(patch.len() as u64),
+                src_extents: vec![
+                    extent(0, old_split as u64),
+                    extent((old_split + 1) as u64, (old.len() - old_split) as u64),
+                ],
+                src_length: Some(old.len() as u64),
+                dst_extents: vec![
+                    extent(0, target_split as u64),
+                    extent((target_split + 1) as u64, (target.len() - target_split) as u64),
+                ],
+                dst_length: Some(target.len() as u64),
+                data_sha256_hash: Some(sha256(&patch)),
+                src_sha256_hash: Some(sha256(&old)),
+            }],
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &patch);
+
+    ExtractOptions::new()
+        .source_dir(&source_dir)
+        .num_threads(2)
+        .extract(&payload, &output_dir)
+        .unwrap();
+
+    assert_eq!(fs::read(output_dir.join("system.img")).unwrap(), expected);
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+    assert_eq!(fs::read_dir(&output_dir).unwrap().count(), 1);
+}
+
+#[cfg(otadump_zucchini)]
+fn assert_zucchini_extraction_fails(patch_name: &str, expected_error: &str) {
+    let patch = fs::read(Path::new(ZUCCHINI_FIXTURES).join(patch_name)).unwrap();
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    let source = b"abcd";
+    fs::write(source_dir.join("system.img"), source).unwrap();
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(1),
+        minor_version: Some(8),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(source)),
+            new_partition_info: Some(partition_info(source)),
+            operations: vec![InstallOperation {
+                operation_type: 11,
+                data_offset: Some(0),
+                data_length: Some(patch.len() as u64),
+                src_extents: vec![extent(0, source.len() as u64)],
+                src_length: Some(source.len() as u64),
+                dst_extents: vec![extent(0, source.len() as u64)],
+                dst_length: Some(source.len() as u64),
+                data_sha256_hash: Some(sha256(&patch)),
+                src_sha256_hash: Some(sha256(source)),
+            }],
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &patch);
+
+    let error = ExtractOptions::new()
+        .source_dir(&source_dir)
+        .num_threads(2)
+        .extract(&payload, &output_dir)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains(expected_error), "unexpected error: {error}");
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+    assert!(!output_dir.join("system.img").exists());
+    assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+}
+
 #[test]
 #[cfg(otadump_zucchini)]
 fn zucchini_wrapper_applies_android_formats_exactly() {
@@ -127,6 +237,39 @@ fn zucchini_wrapper_applies_android_formats_exactly() {
     assert_zucchini_fixture("elf", "");
     assert_zucchini_fixture("elf-arm32", "");
     assert_zucchini_fixture("elf-arm64", "");
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_operations_reconstruct_android_formats_exactly() {
+    for (name, extension) in [
+        ("noop", ".bin"),
+        ("dex", ".dex"),
+        ("elf-x86", ""),
+        ("elf", ""),
+        ("elf-arm32", ""),
+        ("elf-arm64", ""),
+    ] {
+        assert_zucchini_extraction(name, extension);
+    }
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_operation_rejects_malformed_outer_brotli_without_publication() {
+    assert_zucchini_extraction_fails(
+        "malformed-brotli.zuc.br",
+        "Unable to decode ZUCCHINI Brotli patch",
+    );
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_operation_rejects_malformed_inner_patch_without_publication() {
+    assert_zucchini_extraction_fails(
+        "malformed-zucchini.zuc.br",
+        "ZUCCHINI apply failed: invalid ensemble patch",
+    );
 }
 
 #[test]
