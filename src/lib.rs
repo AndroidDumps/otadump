@@ -19,6 +19,7 @@ use std::sync::{Arc, OnceLock};
 use std::{error, result, slice, thread};
 
 use anyhow::{Context as _, Error, Result, bail, ensure};
+use bsdiff_android::patch_bsdf2;
 use bzip2::read::BzDecoder;
 use chromeos_update_engine::install_operation::Type;
 use chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
@@ -853,6 +854,14 @@ impl Task<'_> {
                 self.write_exact(&source, &mut dst_extents)
                     .context("Error in SOURCE_COPY operation")
             }
+            Type::SourceBsdiff => {
+                let patch = self.extract_data(op).context("Error extracting SOURCE_BSDIFF data")?;
+                self.run_op_bsdiff(op, patch, "SOURCE_BSDIFF", &mut dst_extents)
+            }
+            Type::BrotliBsdiff => {
+                let patch = self.extract_data(op).context("Error extracting BROTLI_BSDIFF data")?;
+                self.run_op_bsdiff(op, patch, "BROTLI_BSDIFF", &mut dst_extents)
+            }
             Type::Zero | Type::Discard => {
                 for extent in dst_extents {
                     for chunk in extent.chunks_mut(VERIFY_CHUNK_SIZE) {
@@ -882,6 +891,30 @@ impl Task<'_> {
             }
         }
         Ok(data)
+    }
+
+    fn run_op_bsdiff(
+        &self,
+        op: &InstallOperation,
+        patch: &[u8],
+        operation: &str,
+        dst_extents: &mut [&mut [u8]],
+    ) -> Result<()> {
+        let source = self.extract_source_data(op)?;
+        let expected_output_len = dst_extents.iter().try_fold(0usize, |len, extent| {
+            len.checked_add(extent.len()).context("Combined destination length overflow")
+        })?;
+        validate_bsdiff_output_len(patch, expected_output_len)
+            .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
+        self.cancellation_token.check()?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(expected_output_len)
+            .context("Unable to allocate patched output buffer")?;
+        patch_bsdf2(&source, patch, &mut output)
+            .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
+        self.cancellation_token.check()?;
+        self.write_exact(&output, dst_extents)
     }
 
     fn write_exact(&self, data: &[u8], dst_extents: &mut [&mut [u8]]) -> Result<()> {
@@ -1000,6 +1033,19 @@ impl Task<'_> {
             self.progress_reporter.report_progress(progress);
         }
     }
+}
+
+fn validate_bsdiff_output_len(patch: &[u8], expected: usize) -> Result<()> {
+    ensure!(patch.len() >= 32, "Patch data too short");
+    ensure!(
+        &patch[..8] == b"BSDIFF40" || &patch[..5] == b"BSDF2",
+        "Invalid BSDIFF/BSDF2 magic header"
+    );
+    let encoded = u64::from_le_bytes(patch[24..32].try_into().unwrap());
+    ensure!(encoded & (1 << 63) == 0, "Negative output length in patch header");
+    let actual = usize::try_from(encoded).context("Patch output length is too large")?;
+    ensure!(actual == expected, "Patch output length mismatch: expected {expected}, got {actual}");
+    Ok(())
 }
 
 pub trait ProgressReporter: Sync {

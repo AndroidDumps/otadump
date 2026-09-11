@@ -81,7 +81,8 @@ otadump ota.zip
 # Run on payload.bin file.
 otadump payload.bin
 
-# Apply a SOURCE_COPY delta payload with matching base partition images.
+# Apply a SOURCE_COPY, SOURCE_BSDIFF, or BROTLI_BSDIFF delta payload with
+# matching base partition images.
 otadump delta.zip --output-dir output --source-dir source-images
 ```
 

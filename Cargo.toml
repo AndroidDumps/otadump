@@ -26,6 +26,8 @@ protoc-bin-vendored = "3.2.0"
 
 [dependencies]
 anyhow = "1.0.69"
+brotli = "8.0.2"
+bsdiff-android = "0.0.2"
 bzip2 = { version = "0.6.0" }
 clap = { version = "4.2.1", features = ["derive"] }
 color-print = "0.3.4"
