@@ -695,6 +695,45 @@ fn cancellation_cleans_staging_without_promoting_or_modifying_source() {
     );
 }
 
+#[test]
+fn cli_extraction_error_exits_nonzero_and_reports_diagnostic() {
+    use std::process::Command;
+
+    let temporary = TempDir::new().unwrap();
+    let payload = temporary.path().join("payload.bin");
+    let output_dir = temporary.path().join("output");
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(4),
+        minor_version: Some(2),
+        partitions: vec![PartitionUpdate {
+            partition_name: "boot".into(),
+            old_partition_info: Some(partition_info(b"base")),
+            new_partition_info: Some(partition_info(b"base")),
+            operations: vec![InstallOperation {
+                operation_type: 4,
+                src_extents: vec![extent(0, 1)],
+                dst_extents: vec![extent(0, 1)],
+                ..Default::default()
+            }],
+        }],
+    };
+    write_payload(&payload, manifest, &[]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_otadump"))
+        .arg(&payload)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "CLI did not exit with code 1; stderr: {stderr}");
+    assert!(
+        stderr.contains("require a source directory"),
+        "missing extraction diagnostic: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn cli_sigint_exits_130_after_cleaning_staging() {

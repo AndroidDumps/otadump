@@ -1,15 +1,18 @@
+use std::process::ExitCode;
+
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use otadump::{CancellationToken, ExtractOptions, ProgressReporter, is_cancellation};
 
-fn main() -> Result<(), ctrlc::Error> {
+fn main() -> Result<ExitCode, ctrlc::Error> {
     let cancellation_token = CancellationToken::new();
     let signal_token = cancellation_token.clone();
     ctrlc::set_handler(move || signal_token.cancel())?;
-    if extract(&cancellation_token) || cancellation_token.is_cancelled() {
-        std::process::exit(130);
+    let exit_code = extract(&cancellation_token);
+    if cancellation_token.is_cancelled() {
+        return Ok(ExitCode::from(130));
     }
-    Ok(())
+    Ok(exit_code)
 }
 
 const HELP_TEMPLATE: &str = color_print::cstr!(
@@ -49,7 +52,7 @@ pub struct Args {
     pub source_dir: Option<String>,
 }
 
-pub fn extract(cancellation_token: &CancellationToken) -> bool {
+pub fn extract(cancellation_token: &CancellationToken) -> ExitCode {
     let args = Args::parse();
 
     let reporter = Box::new(CliProgressReporter::new());
@@ -66,15 +69,14 @@ pub fn extract(cancellation_token: &CancellationToken) -> bool {
         Ok(()) => {
             let message = format!("Extraction complete: {}", args.output_dir);
             reporter.progress_bar.println(message);
-            false
+            ExitCode::SUCCESS
         }
         Err(e) => {
             if is_cancellation(e.as_ref()) {
-                return true;
+                return ExitCode::from(130);
             }
-            let message = format!("Error: {e:?}");
-            reporter.progress_bar.println(message);
-            false
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
         }
     }
 }
