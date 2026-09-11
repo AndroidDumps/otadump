@@ -23,6 +23,22 @@ def main() -> None:
         else:
             raise AssertionError("invalid payload unexpectedly succeeded")
 
+        cancellation_token = otadump.CancellationToken()
+        cancellation_token.cancel()
+        cancellation_token.cancel()
+        cancelled_output = temporary_path / "cancelled-output"
+        try:
+            otadump.extract(
+                payload_file,
+                cancelled_output,
+                cancellation_token=cancellation_token,
+            )
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("cancelled extraction unexpectedly succeeded")
+        assert not cancelled_output.exists()
+
 
 if __name__ == "__main__":
     main()

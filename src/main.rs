@@ -1,10 +1,14 @@
-use anyhow::Result;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use otadump::{ExtractOptions, ProgressReporter};
+use otadump::{CancellationToken, ExtractOptions, ProgressReporter, is_cancellation};
 
-fn main() -> Result<()> {
-    extract();
+fn main() -> Result<(), ctrlc::Error> {
+    let cancellation_token = CancellationToken::new();
+    let signal_token = cancellation_token.clone();
+    ctrlc::set_handler(move || signal_token.cancel())?;
+    if extract(&cancellation_token) || cancellation_token.is_cancelled() {
+        std::process::exit(130);
+    }
     Ok(())
 }
 
@@ -45,14 +49,14 @@ pub struct Args {
     pub source_dir: Option<String>,
 }
 
-pub fn extract() {
+pub fn extract(cancellation_token: &CancellationToken) -> bool {
     let args = Args::parse();
 
     let reporter = Box::new(CliProgressReporter::new());
     let reporter = reporter.as_ref();
 
     let mut options = ExtractOptions::new();
-    options.progress_reporter(reporter);
+    options.progress_reporter(reporter).cancellation_token(cancellation_token);
     if let Some(source_dir) = &args.source_dir {
         options.source_dir(source_dir);
     }
@@ -62,10 +66,15 @@ pub fn extract() {
         Ok(()) => {
             let message = format!("Extraction complete: {}", args.output_dir);
             reporter.progress_bar.println(message);
+            false
         }
         Err(e) => {
+            if is_cancellation(e.as_ref()) {
+                return true;
+            }
             let message = format!("Error: {e:?}");
             reporter.progress_bar.println(message);
+            false
         }
     }
 }

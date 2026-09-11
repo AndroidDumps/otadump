@@ -14,8 +14,8 @@ use std::io::Read;
 use std::num::NonZero;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::{error, result, slice, thread};
 
 use anyhow::{Context as _, Error, Result, bail, ensure};
@@ -39,6 +39,54 @@ pub use crate::payload::Payload;
 // the progress tracker.
 const VERIFY_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
 
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(ExtractionCancelled.into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct ExtractionCancelled;
+
+impl std::fmt::Display for ExtractionCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Extraction cancelled")
+    }
+}
+
+impl error::Error for ExtractionCancelled {}
+
+pub fn is_cancellation(error: &(dyn error::Error + 'static)) -> bool {
+    let mut error = Some(error);
+    while let Some(current) = error {
+        if current.downcast_ref::<ExtractionCancelled>().is_some() {
+            return true;
+        }
+        error = current.source();
+    }
+    false
+}
+
 pub struct ExtractOptions<'a> {
     num_threads: Option<usize>,
     overwrite: bool,
@@ -46,6 +94,7 @@ pub struct ExtractOptions<'a> {
     progress_reporter: &'a dyn ProgressReporter,
     verify: bool,
     source_dir: Option<PathBuf>,
+    cancellation_token: CancellationToken,
 }
 
 impl<'a> ExtractOptions<'a> {
@@ -58,6 +107,7 @@ impl<'a> ExtractOptions<'a> {
             progress_reporter: &NoOpProgressReporter,
             verify: true,
             source_dir: None,
+            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -73,14 +123,18 @@ impl<'a> ExtractOptions<'a> {
     {
         let payload_file = payload_file.as_ref();
         let output_dir = output_dir.as_ref();
-        self.extract_impl(payload_file, output_dir)?;
-        Ok(())
+        match self.extract_impl(payload_file, output_dir) {
+            Ok(()) => Ok(()),
+            Err(error) if error.is::<ExtractionCancelled>() => Err(Box::new(ExtractionCancelled)),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn extract_impl(&self, payload_file: &Path, output_dir: &Path) -> Result<()> {
+        self.cancellation_token.check()?;
         self.progress_reporter.report_progress(0.);
 
-        let payload_file = Self::open_payload_file(payload_file)?;
+        let payload_file = self.open_payload_file(payload_file)?;
         let payload = Payload::parse(&payload_file)?;
 
         let mut manifest =
@@ -118,6 +172,7 @@ impl<'a> ExtractOptions<'a> {
 
         // Ensure that all partitions to be extracted are present in the manifest.
         for partition_name in self.partitions.iter().flatten() {
+            self.cancellation_token.check()?;
             ensure!(
                 manifest.partitions.iter().any(|update| &update.partition_name == partition_name),
                 "Partition not found: {partition_name}",
@@ -136,6 +191,7 @@ impl<'a> ExtractOptions<'a> {
         let mut partition_names = HashSet::with_capacity(manifest.partitions.len());
         let mut destinations = Vec::with_capacity(manifest.partitions.len());
         for update in &manifest.partitions {
+            self.cancellation_token.check()?;
             ensure!(
                 partition_names.insert(&update.partition_name),
                 "Duplicate partition mapping: {:?}",
@@ -144,6 +200,7 @@ impl<'a> ExtractOptions<'a> {
             destinations.push(output_dir.join(format!("{}.img", update.partition_name)));
         }
         for (update, destination) in manifest.partitions.iter().zip(&destinations) {
+            self.cancellation_token.check()?;
             for source in sources.iter().flatten() {
                 ensure!(
                     !paths_alias(&source.path, destination)?,
@@ -167,6 +224,7 @@ impl<'a> ExtractOptions<'a> {
         let mut staging_paths = Vec::with_capacity(manifest.partitions.len());
         let mut partitions = Vec::with_capacity(manifest.partitions.len());
         for update in &manifest.partitions {
+            self.cancellation_token.check()?;
             let (path, partition) = self.create_staged_partition(update, staging_dir.path())?;
             staging_paths.push(path);
             partitions.push(partition);
@@ -190,6 +248,10 @@ impl<'a> ExtractOptions<'a> {
                 if error.get().is_some() {
                     break;
                 }
+                if let Err(cancelled) = self.cancellation_token.check() {
+                    _ = error.set(cancelled);
+                    break;
+                }
 
                 // Create and broadcast a task to the threadpool.
                 let task = Task {
@@ -203,6 +265,7 @@ impl<'a> ExtractOptions<'a> {
                     total_ops,
                     total_ops_completed: &total_ops_completed,
                     progress_reporter: self.progress_reporter,
+                    cancellation_token: &self.cancellation_token,
                     error: &error,
                 };
                 scope.spawn_broadcast(move |_, ctx| {
@@ -213,11 +276,13 @@ impl<'a> ExtractOptions<'a> {
             }
         });
 
+        self.cancellation_token.check()?;
         if let Some(e) = error.take() {
             return Err(e);
         }
 
         for (staging_path, destination) in staging_paths.into_iter().zip(destinations) {
+            self.cancellation_token.check()?;
             let result = if self.overwrite {
                 staging_path.persist(&destination)
             } else {
@@ -227,10 +292,11 @@ impl<'a> ExtractOptions<'a> {
         }
 
         self.progress_reporter.report_progress(1.);
+        self.cancellation_token.check()?;
         Ok(())
     }
 
-    fn open_payload_file(path: &Path) -> Result<Mmap> {
+    fn open_payload_file(&self, path: &Path) -> Result<Mmap> {
         let in_file = File::open(path)
             .with_context(|| format!("Failed to open file for reading: {path:?}"))?;
 
@@ -261,9 +327,12 @@ impl<'a> ExtractOptions<'a> {
                         let mut out_file = unsafe { MmapMut::map_mut(&out_file) }
                             .context("Failed to mmap temporary file")?;
 
-                        zip_file
-                            .read_exact(&mut out_file)
-                            .context("Failed to write to temporary file")?;
+                        for chunk in out_file.chunks_mut(VERIFY_CHUNK_SIZE) {
+                            self.cancellation_token.check()?;
+                            zip_file
+                                .read_exact(chunk)
+                                .context("Failed to write to temporary file")?;
+                        }
                         out_file.make_read_only().context("Failed to make temporary file read-only")
                     }
                 }
@@ -281,6 +350,7 @@ impl<'a> ExtractOptions<'a> {
         block_size: usize,
     ) -> Result<Option<SourcePartition>> {
         validate_partition_name(&update.partition_name)?;
+        self.cancellation_token.check()?;
 
         let partition_len = update
             .new_partition_info
@@ -295,6 +365,7 @@ impl<'a> ExtractOptions<'a> {
         );
 
         let needs_source = update.operations.iter().try_fold(false, |needed, op| {
+            self.cancellation_token.check()?;
             let op_type = Type::try_from(op.r#type).context("Invalid operation")?;
             validate_operation_type(op_type)?;
             Ok::<_, Error>(needed || operation_needs_source(op_type))
@@ -303,6 +374,7 @@ impl<'a> ExtractOptions<'a> {
 
         let mut destination_ranges = Vec::new();
         for (op_index, op) in update.operations.iter().enumerate() {
+            self.cancellation_token.check()?;
             let op_type = Type::try_from(op.r#type).context("Invalid operation")?;
             let dst_ranges = extent_ranges(&op.dst_extents, block_size, partition_len)
                 .with_context(|| format!("Invalid destination extents for operation {op_index}"))?;
@@ -339,6 +411,7 @@ impl<'a> ExtractOptions<'a> {
                         &src_ranges,
                         op.src_sha256_hash.as_deref(),
                         "Source extent",
+                        &self.cancellation_token,
                     )
                     .with_context(|| {
                         format!("Source verification failed for operation {op_index}")
@@ -350,9 +423,15 @@ impl<'a> ExtractOptions<'a> {
                 let data = extract_operation_data(payload, op)
                     .with_context(|| format!("Invalid data for operation {op_index}"))?;
                 if self.verify {
-                    verify_hash(data, op.data_sha256_hash.as_deref(), "Input").with_context(
-                        || format!("Data verification failed for operation {op_index}"),
-                    )?;
+                    verify_hash(
+                        data,
+                        op.data_sha256_hash.as_deref(),
+                        "Input",
+                        &self.cancellation_token,
+                    )
+                    .with_context(|| {
+                        format!("Data verification failed for operation {op_index}")
+                    })?;
                 }
             }
         }
@@ -405,7 +484,12 @@ impl<'a> ExtractOptions<'a> {
             source.len
         );
         let expected_hash = info.hash.as_deref().context("Source partition hash is missing")?;
-        verify_hash(source.bytes(), Some(expected_hash), "Source partition")?;
+        verify_hash(
+            source.bytes(),
+            Some(expected_hash),
+            "Source partition",
+            &self.cancellation_token,
+        )?;
         Ok(source)
     }
 
@@ -474,6 +558,12 @@ impl<'a> ExtractOptions<'a> {
     /// Set the directory containing base partition images for delta OTA extraction.
     pub fn source_dir<P: AsRef<Path>>(&mut self, source_dir: P) -> &mut Self {
         self.source_dir = Some(source_dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Stop extraction cooperatively when the caller cancels the token.
+    pub fn cancellation_token(&mut self, cancellation_token: &CancellationToken) -> &mut Self {
+        self.cancellation_token = cancellation_token.clone();
         self
     }
 }
@@ -587,11 +677,22 @@ fn extract_operation_data<'a>(payload: &'a Payload<'a>, op: &InstallOperation) -
     payload.data.get(offset..end).context("Data range exceeds payload size")
 }
 
-fn verify_hash(data: &[u8], expected: Option<&[u8]>, label: &str) -> Result<()> {
+fn verify_hash(
+    data: &[u8],
+    expected: Option<&[u8]>,
+    label: &str,
+    cancellation_token: &CancellationToken,
+) -> Result<()> {
+    cancellation_token.check()?;
     let Some(expected) = expected else {
         return Ok(());
     };
-    let actual = digest::digest(&digest::SHA256, data);
+    let mut context = digest::Context::new(&digest::SHA256);
+    for chunk in data.chunks(VERIFY_CHUNK_SIZE) {
+        cancellation_token.check()?;
+        context.update(chunk);
+    }
+    let actual = context.finish();
     ensure!(
         actual.as_ref() == expected,
         "{label} hash mismatch: expected {}, got {}",
@@ -606,13 +707,18 @@ fn verify_hash_over_ranges(
     ranges: &[Range<usize>],
     expected: Option<&[u8]>,
     label: &str,
+    cancellation_token: &CancellationToken,
 ) -> Result<()> {
+    cancellation_token.check()?;
     let Some(expected) = expected else {
         return Ok(());
     };
     let mut context = digest::Context::new(&digest::SHA256);
     for range in ranges {
-        context.update(&data[range.clone()]);
+        for chunk in data[range.clone()].chunks(VERIFY_CHUNK_SIZE) {
+            cancellation_token.check()?;
+            context.update(chunk);
+        }
     }
     let actual = context.finish();
     ensure!(
@@ -677,6 +783,7 @@ struct Task<'a> {
     total_ops: usize,
     total_ops_completed: &'a AtomicUsize,
     progress_reporter: &'a dyn ProgressReporter,
+    cancellation_token: &'a CancellationToken,
 
     error: &'a OnceLock<Error>,
 }
@@ -685,10 +792,12 @@ impl Task<'_> {
     fn run(&self, ctx: BroadcastContext<'_>) -> Result<()> {
         // If an error has already occurred, stop processing the partition.
         while self.error.get().is_none() {
+            self.cancellation_token.check()?;
             let op_idx = self.op_idx.fetch_add(1, Ordering::AcqRel);
             match self.update.operations.get(op_idx) {
                 Some(op) => {
                     self.run_op(op)?;
+                    self.cancellation_token.check()?;
                     self.increment_progress();
                 }
                 None => {
@@ -696,7 +805,9 @@ impl Task<'_> {
                     // partition, the partition is fully extracted and can now be
                     // verified.
                     if op_idx + 1 == self.update.operations.len() + ctx.num_threads() {
+                        self.cancellation_token.check()?;
                         self.verify_partition()?;
+                        self.cancellation_token.check()?;
                         unsafe { (*self.partition.get()).flush() }
                             .context("Error while flushing file to disk")?;
                     };
@@ -709,6 +820,7 @@ impl Task<'_> {
 
     #[allow(deprecated)]
     fn run_op(&self, op: &InstallOperation) -> Result<()> {
+        self.cancellation_token.check()?;
         let mut dst_extents =
             self.extract_dst_extents(op).context("Error extracting dst_extents")?;
         match Type::try_from(op.r#type).context("Invalid operation")? {
@@ -743,7 +855,10 @@ impl Task<'_> {
             }
             Type::Zero | Type::Discard => {
                 for extent in dst_extents {
-                    extent.fill(0);
+                    for chunk in extent.chunks_mut(VERIFY_CHUNK_SIZE) {
+                        self.cancellation_token.check()?;
+                        chunk.fill(0);
+                    }
                 }
                 Ok(())
             }
@@ -751,7 +866,8 @@ impl Task<'_> {
                 bail!("Deprecated operation is not supported: {:?}", Type::try_from(op.r#type)?)
             }
             op => bail!("Unimplemented operation: {op:?}"),
-        }
+        }?;
+        self.cancellation_token.check()
     }
 
     fn extract_source_data(&self, op: &InstallOperation) -> Result<Vec<u8>> {
@@ -760,7 +876,10 @@ impl Task<'_> {
         let capacity = ranges_len(&ranges)?;
         let mut data = Vec::with_capacity(capacity);
         for range in ranges {
-            data.extend_from_slice(&source.bytes()[range]);
+            for chunk in source.bytes()[range].chunks(VERIFY_CHUNK_SIZE) {
+                self.cancellation_token.check()?;
+                data.extend_from_slice(chunk);
+            }
         }
         Ok(data)
     }
@@ -776,9 +895,12 @@ impl Task<'_> {
         );
         let mut offset = 0usize;
         for extent in dst_extents {
-            let end = offset.checked_add(extent.len()).context("Destination offset overflow")?;
-            extent.copy_from_slice(&data[offset..end]);
-            offset = end;
+            for chunk in extent.chunks_mut(VERIFY_CHUNK_SIZE) {
+                self.cancellation_token.check()?;
+                let end = offset.checked_add(chunk.len()).context("Destination offset overflow")?;
+                chunk.copy_from_slice(&data[offset..end]);
+                offset = end;
+            }
         }
         Ok(())
     }
@@ -790,7 +912,9 @@ impl Task<'_> {
         for extent in dst_extents {
             let mut extent = &mut **extent;
             loop {
-                match reader.read(extent).context("Failed to write to buffer")? {
+                self.cancellation_token.check()?;
+                let chunk_len = extent.len().min(VERIFY_CHUNK_SIZE);
+                match reader.read(&mut extent[..chunk_len]).context("Failed to write to buffer")? {
                     0 => break,
                     n => {
                         bytes_written += n;
@@ -799,6 +923,7 @@ impl Task<'_> {
                 }
             }
         }
+        self.cancellation_token.check()?;
         ensure!(reader.read(&mut [0])? == 0, "Decoded data exceeds destination extents");
 
         // Align number of bytes written to block size. The formula for alignment is:
@@ -839,7 +964,7 @@ impl Task<'_> {
         if !self.verify {
             return Ok(());
         }
-        verify_hash(data, op.data_sha256_hash.as_deref(), "Input")
+        verify_hash(data, op.data_sha256_hash.as_deref(), "Input", self.cancellation_token)
     }
 
     fn verify_partition(&self) -> Result<()> {
@@ -852,10 +977,12 @@ impl Task<'_> {
 
         let mut digest = digest::Context::new(&digest::SHA256);
         for chunk in unsafe { (*self.partition.get()).chunks(VERIFY_CHUNK_SIZE) } {
+            self.cancellation_token.check()?;
             digest.update(chunk);
             self.increment_progress();
         }
 
+        self.cancellation_token.check()?;
         let got_hash = digest.finish();
         let got_hash = got_hash.as_ref();
         ensure!(

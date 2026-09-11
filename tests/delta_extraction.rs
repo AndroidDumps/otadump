@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use otadump::ExtractOptions;
+use otadump::{CancellationToken, ExtractOptions, ProgressReporter, is_cancellation};
 use prost::Message;
 use ring::digest;
 use tempfile::TempDir;
@@ -466,6 +467,162 @@ fn partition_selection_does_not_require_unselected_delta_sources() {
 
     assert_eq!(fs::read(output_dir.join("boot.img")).unwrap(), expected);
     assert!(!output_dir.join("system.img").exists());
+}
+
+struct CancellingReporter {
+    cancellation_token: CancellationToken,
+    cancelled: AtomicBool,
+}
+
+impl ProgressReporter for CancellingReporter {
+    fn report_progress(&self, progress: f64) {
+        if progress > 0.0 && !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.cancellation_token.cancel();
+        }
+    }
+}
+
+#[test]
+fn cancellation_cleans_staging_without_promoting_or_modifying_source() {
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    let source = (0..128).map(|byte| byte as u8).collect::<Vec<_>>();
+    fs::write(source_dir.join("system.img"), &source).unwrap();
+    let existing = b"existing destination";
+    fs::write(output_dir.join("system.img"), existing).unwrap();
+    let operations = (0..32)
+        .map(|block| InstallOperation {
+            operation_type: 4,
+            src_extents: vec![extent(block, 1)],
+            src_length: Some(4),
+            dst_extents: vec![extent(block, 1)],
+            dst_length: Some(4),
+            ..Default::default()
+        })
+        .collect();
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(4),
+        minor_version: Some(2),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(&source)),
+            new_partition_info: Some(partition_info(&source)),
+            operations,
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &[]);
+    let cancellation_token = CancellationToken::new();
+    let reporter = CancellingReporter {
+        cancellation_token: cancellation_token.clone(),
+        cancelled: AtomicBool::new(false),
+    };
+
+    let error = ExtractOptions::new()
+        .source_dir(&source_dir)
+        .overwrite(true)
+        .num_threads(4)
+        .progress_reporter(&reporter)
+        .cancellation_token(&cancellation_token)
+        .extract(&payload, &output_dir)
+        .unwrap_err();
+
+    assert!(is_cancellation(error.as_ref()));
+    assert_eq!(fs::read(output_dir.join("system.img")).unwrap(), existing);
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+    assert!(
+        fs::read_dir(&output_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".otadump-"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_sigint_exits_130_after_cleaning_staging() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    let block_size = 256usize;
+    let block_count = 65_536usize;
+    let source = vec![0x5a; block_size * block_count];
+    let source_path = source_dir.join("system.img");
+    fs::write(&source_path, &source).unwrap();
+    let operations = (0..block_count)
+        .map(|block| InstallOperation {
+            operation_type: 4,
+            src_extents: vec![extent(block as u64, 1)],
+            src_length: Some(block_size as u64),
+            dst_extents: vec![extent(block as u64, 1)],
+            dst_length: Some(block_size as u64),
+            ..Default::default()
+        })
+        .collect();
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(block_size as u32),
+        minor_version: Some(2),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(&source)),
+            new_partition_info: Some(partition_info(&source)),
+            operations,
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &[]);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_otadump"))
+        .arg(&payload)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--source-dir")
+        .arg(&source_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let staging_exists = output_dir.exists()
+            && fs::read_dir(&output_dir)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".otadump-"));
+        if staging_exists {
+            break;
+        }
+        assert!(child.try_wait().unwrap().is_none(), "CLI finished before SIGINT");
+        assert!(Instant::now() < deadline, "staging directory was not created");
+        std::thread::yield_now();
+    }
+    let signal_status =
+        Command::new("kill").arg("-INT").arg(child.id().to_string()).status().unwrap();
+    assert!(signal_status.success());
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= exit_deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("CLI did not finish cleanup after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+
+    assert_eq!(status.code(), Some(130));
+    assert!(!output_dir.join("system.img").exists());
+    assert_eq!(sha256(&fs::read(source_path).unwrap()), sha256(&source));
+    assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
 }
 
 #[cfg(unix)]
