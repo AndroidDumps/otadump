@@ -635,6 +635,7 @@ dependencies = [
  "brotli",
  "bsdiff-android",
  "bzip2",
+ "cc",
  "clap",
  "color-print",
  "ctrlc",

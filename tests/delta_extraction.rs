@@ -105,6 +105,56 @@ const BROTLI_INVALID_HEADER_PATCH: &[u8] = &[
     0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
 ];
 
+#[cfg(otadump_zucchini)]
+const ZUCCHINI_FIXTURES: &str = "tests/fixtures/zucchini";
+
+#[cfg(otadump_zucchini)]
+fn assert_zucchini_fixture(name: &str, extension: &str) {
+    let fixtures = Path::new(ZUCCHINI_FIXTURES);
+    let old = fs::read(fixtures.join(format!("{name}-old{extension}"))).unwrap();
+    let expected = fs::read(fixtures.join(format!("{name}-new{extension}"))).unwrap();
+    let patch = fs::read(fixtures.join(format!("{name}.zuc"))).unwrap();
+    let output = otadump::zucchini::apply(&old, &patch, expected.len()).unwrap();
+    assert_eq!(output, expected);
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_wrapper_applies_android_formats_exactly() {
+    assert_zucchini_fixture("noop", ".bin");
+    assert_zucchini_fixture("dex", ".dex");
+    assert_zucchini_fixture("elf-x86", "");
+    assert_zucchini_fixture("elf", "");
+    assert_zucchini_fixture("elf-arm32", "");
+    assert_zucchini_fixture("elf-arm64", "");
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_wrapper_applies_large_dex_jumbo_reference() {
+    assert_zucchini_fixture("dex-large", ".dex");
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_wrapper_rejects_unsafe_large_dex_string16_reference() {
+    let fixtures = Path::new(ZUCCHINI_FIXTURES);
+    let old = fs::read(fixtures.join("dex-large-old.dex")).unwrap();
+    let patch = fs::read(fixtures.join("dex-large-unsafe16.zuc")).unwrap();
+    let expected_size = fs::metadata(fixtures.join("dex-large-new.dex")).unwrap().len() as usize;
+    let error = otadump::zucchini::apply(&old, &patch, expected_size).unwrap_err();
+    assert_eq!(error.status(), otadump::zucchini::Status::ApplyError);
+    assert_eq!(error.to_string(), "android executable preflight failed");
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn zucchini_wrapper_returns_owned_error_for_malformed_patch() {
+    let error = otadump::zucchini::apply(b"abcd", b"not a patch", 5).unwrap_err();
+    assert_eq!(error.status(), otadump::zucchini::Status::InvalidPatch);
+    assert_eq!(error.to_string(), "invalid ensemble patch");
+}
+
 fn extent(start_block: u64, num_blocks: u64) -> Extent {
     Extent { start_block: Some(start_block), num_blocks: Some(num_blocks) }
 }

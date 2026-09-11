@@ -7,6 +7,7 @@ mod payload;
 #[cfg(feature = "python")]
 mod python;
 mod verity;
+pub mod zucchini;
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
