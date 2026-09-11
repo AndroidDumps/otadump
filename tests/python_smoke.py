@@ -7,7 +7,9 @@ import otadump
 
 def main() -> None:
     assert issubclass(otadump.OtaDumpError, Exception)
-    assert "partitions" in str(signature(otadump.extract))
+    extract_signature = str(signature(otadump.extract))
+    assert "partitions" in extract_signature
+    assert "source_dir=None" in extract_signature
 
     with TemporaryDirectory() as temporary_directory:
         temporary_path = Path(temporary_directory)

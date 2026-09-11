@@ -9,11 +9,11 @@ mod python;
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Read;
 use std::num::NonZero;
-use std::ops::Mul;
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{error, result, slice, thread};
@@ -28,6 +28,7 @@ use prost::Message as _;
 use rayon::{BroadcastContext, ThreadPoolBuilder};
 use ring::digest;
 use sync_unsafe_cell::SyncUnsafeCell;
+use tempfile::TempPath;
 use zip::ZipArchive;
 use zip::result::ZipError;
 use zstd::Decoder as ZstdDecoder;
@@ -44,6 +45,7 @@ pub struct ExtractOptions<'a> {
     partitions: Option<HashSet<String>>,
     progress_reporter: &'a dyn ProgressReporter,
     verify: bool,
+    source_dir: Option<PathBuf>,
 }
 
 impl<'a> ExtractOptions<'a> {
@@ -55,6 +57,7 @@ impl<'a> ExtractOptions<'a> {
             partitions: None,
             progress_reporter: &NoOpProgressReporter,
             verify: true,
+            source_dir: None,
         }
     }
 
@@ -97,24 +100,21 @@ impl<'a> ExtractOptions<'a> {
 
         let extract_ops =
             manifest.partitions.iter().map(|update| update.operations.len()).sum::<usize>();
-        let verify_ops = if self.verify {
-            manifest
-                .partitions
-                .iter()
-                .map(|update| {
-                    let partition_size =
-                        update.new_partition_info.as_ref().and_then(|info| info.size).unwrap_or(0)
-                            as usize;
-                    partition_size.div_ceil(VERIFY_CHUNK_SIZE)
-                })
-                .sum()
-        } else {
-            0
-        };
+        let verify_ops: usize = manifest
+            .partitions
+            .iter()
+            .map(|update| {
+                let partition_size =
+                    update.new_partition_info.as_ref().and_then(|info| info.size).unwrap_or(0)
+                        as usize;
+                partition_size.div_ceil(VERIFY_CHUNK_SIZE)
+            })
+            .sum();
         let total_ops = extract_ops + verify_ops;
         let total_ops_completed = AtomicUsize::new(0);
 
         let block_size = manifest.block_size.context("block_size not defined")? as usize;
+        ensure!(block_size > 0, "block_size must be greater than zero");
 
         // Ensure that all partitions to be extracted are present in the manifest.
         for partition_name in self.partitions.iter().flatten() {
@@ -127,6 +127,51 @@ impl<'a> ExtractOptions<'a> {
         fs::create_dir_all(output_dir)
             .with_context(|| format!("Could not create output directory: {output_dir:?}"))?;
 
+        let sources = manifest
+            .partitions
+            .iter()
+            .map(|update| self.validate_partition(update, &payload, block_size))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut partition_names = HashSet::with_capacity(manifest.partitions.len());
+        let mut destinations = Vec::with_capacity(manifest.partitions.len());
+        for update in &manifest.partitions {
+            ensure!(
+                partition_names.insert(&update.partition_name),
+                "Duplicate partition mapping: {:?}",
+                update.partition_name
+            );
+            destinations.push(output_dir.join(format!("{}.img", update.partition_name)));
+        }
+        for (update, destination) in manifest.partitions.iter().zip(&destinations) {
+            for source in sources.iter().flatten() {
+                ensure!(
+                    !paths_alias(&source.path, destination)?,
+                    "Source partition image {:?} and destination partition image {destination:?} refer to the same file",
+                    source.path,
+                );
+            }
+            if !self.overwrite {
+                ensure!(
+                    !path_entry_exists(destination)?,
+                    "Destination partition image already exists for {:?}: {destination:?}",
+                    update.partition_name
+                );
+            }
+        }
+
+        let staging_dir = tempfile::Builder::new()
+            .prefix(".otadump-")
+            .tempdir_in(output_dir)
+            .context("Unable to create staging directory")?;
+        let mut staging_paths = Vec::with_capacity(manifest.partitions.len());
+        let mut partitions = Vec::with_capacity(manifest.partitions.len());
+        for update in &manifest.partitions {
+            let (path, partition) = self.create_staged_partition(update, staging_dir.path())?;
+            staging_paths.push(path);
+            partitions.push(partition);
+        }
+
         let num_threads = self
             .num_threads
             .unwrap_or_else(|| thread::available_parallelism().map(NonZero::get).unwrap_or(1))
@@ -137,20 +182,22 @@ impl<'a> ExtractOptions<'a> {
             .context("Unable to start threadpool")?;
         let mut error = OnceLock::new();
 
-        threadpool.in_place_scope_fifo(|scope| -> Result<()> {
-            for update in &manifest.partitions {
+        threadpool.in_place_scope_fifo(|scope| {
+            for ((update, source), partition) in
+                manifest.partitions.iter().zip(sources).zip(partitions)
+            {
                 // Exit early if an error has occurred.
                 if error.get().is_some() {
                     break;
                 }
 
                 // Create and broadcast a task to the threadpool.
-                let partition = self.open_partition_file(update, output_dir)?;
                 let task = Task {
                     payload: &payload,
                     block_size,
                     verify: self.verify,
                     update,
+                    source,
                     op_idx: AtomicUsize::new(0),
                     partition: SyncUnsafeCell::new(partition),
                     total_ops,
@@ -164,11 +211,19 @@ impl<'a> ExtractOptions<'a> {
                     }
                 });
             }
-            Ok(())
-        })?;
+        });
 
         if let Some(e) = error.take() {
             return Err(e);
+        }
+
+        for (staging_path, destination) in staging_paths.into_iter().zip(destinations) {
+            let result = if self.overwrite {
+                staging_path.persist(&destination)
+            } else {
+                staging_path.persist_noclobber(&destination)
+            };
+            result.map_err(|error| error.error)?;
         }
 
         self.progress_reporter.report_progress(1.);
@@ -219,33 +274,162 @@ impl<'a> ExtractOptions<'a> {
         }
     }
 
-    fn open_partition_file(
+    fn validate_partition(
         &self,
         update: &PartitionUpdate,
-        partition_dir: impl AsRef<Path>,
-    ) -> Result<MmapMut> {
+        payload: &Payload<'_>,
+        block_size: usize,
+    ) -> Result<Option<SourcePartition>> {
+        validate_partition_name(&update.partition_name)?;
+
         let partition_len = update
             .new_partition_info
             .as_ref()
             .and_then(|info| info.size)
             .context("Unable to determine output file size")?;
+        let partition_len =
+            usize::try_from(partition_len).context("Output partition is too large")?;
+        ensure!(
+            update.new_partition_info.as_ref().and_then(|info| info.hash.as_ref()).is_some(),
+            "Unable to determine output partition hash"
+        );
 
-        let filename = Path::new(&update.partition_name).with_extension("img");
-        let path = partition_dir.as_ref().join(filename);
+        let needs_source = update.operations.iter().try_fold(false, |needed, op| {
+            let op_type = Type::try_from(op.r#type).context("Invalid operation")?;
+            validate_operation_type(op_type)?;
+            Ok::<_, Error>(needed || operation_needs_source(op_type))
+        })?;
+        let source = if needs_source { Some(self.open_source_partition(update)?) } else { None };
 
-        let file = OpenOptions::new()
-            .create(true)
-            .create_new(!self.overwrite)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .with_context(|| format!("Unable to open file for writing: {path:?}"))?;
-        file.set_len(partition_len)?;
+        let mut destination_ranges = Vec::new();
+        for (op_index, op) in update.operations.iter().enumerate() {
+            let op_type = Type::try_from(op.r#type).context("Invalid operation")?;
+            let dst_ranges = extent_ranges(&op.dst_extents, block_size, partition_len)
+                .with_context(|| format!("Invalid destination extents for operation {op_index}"))?;
+            ensure!(!dst_ranges.is_empty(), "Operation {op_index} has no destination extents");
+            let dst_len = ranges_len(&dst_ranges)?;
+            if let Some(declared_len) = op.dst_length {
+                ensure!(
+                    usize::try_from(declared_len).ok() == Some(dst_len),
+                    "Destination length mismatch for operation {op_index}"
+                );
+            }
+            destination_ranges.extend(
+                dst_ranges
+                    .iter()
+                    .filter(|range| !range.is_empty())
+                    .map(|range| (range.clone(), op_index)),
+            );
 
-        let file = unsafe { MmapMut::map_mut(&file) }
-            .with_context(|| format!("Failed to mmap file: {path:?}"))?;
-        Ok(file)
+            if operation_needs_source(op_type) {
+                let source = source.as_ref().context("Source partition was not opened")?;
+                let src_ranges = extent_ranges(&op.src_extents, block_size, source.len)
+                    .with_context(|| format!("Invalid source extents for operation {op_index}"))?;
+                ensure!(!src_ranges.is_empty(), "Operation {op_index} has no source extents");
+                let src_len = ranges_len(&src_ranges)?;
+                if let Some(declared_len) = op.src_length {
+                    ensure!(
+                        usize::try_from(declared_len).ok() == Some(src_len),
+                        "Source length mismatch for operation {op_index}"
+                    );
+                }
+                if self.verify {
+                    verify_hash_over_ranges(
+                        source.bytes(),
+                        &src_ranges,
+                        op.src_sha256_hash.as_deref(),
+                        "Source extent",
+                    )
+                    .with_context(|| {
+                        format!("Source verification failed for operation {op_index}")
+                    })?;
+                }
+            }
+
+            if operation_has_data(op_type) {
+                let data = extract_operation_data(payload, op)
+                    .with_context(|| format!("Invalid data for operation {op_index}"))?;
+                if self.verify {
+                    verify_hash(data, op.data_sha256_hash.as_deref(), "Input").with_context(
+                        || format!("Data verification failed for operation {op_index}"),
+                    )?;
+                }
+            }
+        }
+
+        destination_ranges.sort_unstable_by_key(|(range, _)| (range.start, range.end));
+        for pair in destination_ranges.windows(2) {
+            let (left, left_op) = &pair[0];
+            let (right, right_op) = &pair[1];
+            ensure!(
+                left.end <= right.start,
+                "Destination extents overlap between operations {left_op} and {right_op}"
+            );
+        }
+
+        Ok(source)
+    }
+
+    fn open_source_partition(&self, update: &PartitionUpdate) -> Result<SourcePartition> {
+        let source_dir = self.source_dir.as_ref().with_context(|| {
+            format!(
+                "Delta operations for partition {:?} require a source directory",
+                update.partition_name
+            )
+        })?;
+        let path = source_dir.join(format!("{}.img", update.partition_name));
+        let file = File::open(&path)
+            .with_context(|| format!("Unable to open source partition image: {path:?}"))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("Unable to inspect source partition image: {path:?}"))?;
+        ensure!(metadata.is_file(), "Source partition image is not a file: {path:?}");
+        let len = usize::try_from(metadata.len()).context("Source partition is too large")?;
+        let mmap = if len == 0 {
+            None
+        } else {
+            Some(
+                unsafe { MmapOptions::new().map(&file) }
+                    .with_context(|| format!("Failed to mmap source partition image: {path:?}"))?,
+            )
+        };
+        let source = SourcePartition { path, len, mmap };
+
+        let info =
+            update.old_partition_info.as_ref().context("Source partition info is missing")?;
+        let expected_size = info.size.context("Source partition size is missing")?;
+        ensure!(
+            usize::try_from(expected_size).ok() == Some(source.len),
+            "Source partition size mismatch for {:?}: expected {expected_size}, got {}",
+            update.partition_name,
+            source.len
+        );
+        let expected_hash = info.hash.as_deref().context("Source partition hash is missing")?;
+        verify_hash(source.bytes(), Some(expected_hash), "Source partition")?;
+        Ok(source)
+    }
+
+    fn create_staged_partition(
+        &self,
+        update: &PartitionUpdate,
+        staging_dir: &Path,
+    ) -> Result<(TempPath, MmapMut)> {
+        let partition_len = update
+            .new_partition_info
+            .as_ref()
+            .and_then(|info| info.size)
+            .context("Unable to determine output file size")?;
+        ensure!(partition_len > 0, "Output partition size must be greater than zero");
+
+        let file = tempfile::Builder::new()
+            .prefix("partition-")
+            .tempfile_in(staging_dir)
+            .context("Unable to create staged partition image")?;
+        file.as_file().set_len(partition_len)?;
+
+        let partition = unsafe { MmapMut::map_mut(file.as_file()) }
+            .context("Failed to mmap staged partition image")?;
+        Ok((file.into_temp_path(), partition))
     }
 
     /// Number of threads to use for extraction. By default, this is set to the
@@ -280,10 +464,197 @@ impl<'a> ExtractOptions<'a> {
         self
     }
 
-    /// Verify the input and output partitions. This is enabled by default.
+    /// Verify operation data and source extent hashes. This is enabled by default.
+    /// Whole source images and staged output images are always verified.
     pub fn verify(&mut self, verify: bool) -> &mut Self {
         self.verify = verify;
         self
+    }
+
+    /// Set the directory containing base partition images for delta OTA extraction.
+    pub fn source_dir<P: AsRef<Path>>(&mut self, source_dir: P) -> &mut Self {
+        self.source_dir = Some(source_dir.as_ref().to_path_buf());
+        self
+    }
+}
+
+struct SourcePartition {
+    path: PathBuf,
+    len: usize,
+    mmap: Option<Mmap>,
+}
+
+impl SourcePartition {
+    fn bytes(&self) -> &[u8] {
+        self.mmap.as_deref().unwrap_or_default()
+    }
+}
+
+fn validate_partition_name(name: &str) -> Result<()> {
+    let mut components = Path::new(name).components();
+    let valid = matches!(components.next(), Some(Component::Normal(component)) if component == name)
+        && components.next().is_none()
+        && !name.contains('/')
+        && !name.contains('\\');
+    ensure!(valid, "Unsafe partition name: {name:?}");
+    Ok(())
+}
+
+#[allow(deprecated)]
+fn validate_operation_type(op_type: Type) -> Result<()> {
+    match op_type {
+        Type::Move | Type::Bsdiff => bail!("Deprecated operation is not supported: {op_type:?}"),
+        Type::Replace
+        | Type::ReplaceBz
+        | Type::SourceCopy
+        | Type::SourceBsdiff
+        | Type::Zero
+        | Type::Discard
+        | Type::ReplaceXz
+        | Type::Puffdiff
+        | Type::BrotliBsdiff
+        | Type::Zucchini
+        | Type::Lz4diffBsdiff
+        | Type::Lz4diffPuffdiff
+        | Type::ReplaceZstd => Ok(()),
+    }
+}
+
+fn operation_needs_source(op_type: Type) -> bool {
+    matches!(
+        op_type,
+        Type::SourceCopy
+            | Type::SourceBsdiff
+            | Type::Puffdiff
+            | Type::BrotliBsdiff
+            | Type::Zucchini
+            | Type::Lz4diffBsdiff
+            | Type::Lz4diffPuffdiff
+    )
+}
+
+fn operation_has_data(op_type: Type) -> bool {
+    matches!(
+        op_type,
+        Type::Replace
+            | Type::ReplaceBz
+            | Type::SourceBsdiff
+            | Type::ReplaceXz
+            | Type::Puffdiff
+            | Type::BrotliBsdiff
+            | Type::Zucchini
+            | Type::Lz4diffBsdiff
+            | Type::Lz4diffPuffdiff
+            | Type::ReplaceZstd
+    )
+}
+
+fn extent_ranges(
+    extents: &[chromeos_update_engine::Extent],
+    block_size: usize,
+    partition_len: usize,
+) -> Result<Vec<Range<usize>>> {
+    extents
+        .iter()
+        .map(|extent| {
+            let start_block =
+                usize::try_from(extent.start_block.context("start_block not defined in extent")?)
+                    .context("Extent start block is too large")?;
+            let num_blocks =
+                usize::try_from(extent.num_blocks.context("num_blocks not defined in extent")?)
+                    .context("Extent block count is too large")?;
+            let start = start_block.checked_mul(block_size).context("Extent offset overflow")?;
+            let len = num_blocks.checked_mul(block_size).context("Extent length overflow")?;
+            let end = start.checked_add(len).context("Extent end overflow")?;
+            ensure!(end <= partition_len, "Extent exceeds partition size");
+            Ok(start..end)
+        })
+        .collect()
+}
+
+fn ranges_len(ranges: &[Range<usize>]) -> Result<usize> {
+    ranges.iter().try_fold(0usize, |len, range| {
+        len.checked_add(range.len()).context("Combined extent length overflow")
+    })
+}
+
+fn extract_operation_data<'a>(payload: &'a Payload<'a>, op: &InstallOperation) -> Result<&'a [u8]> {
+    let offset = usize::try_from(op.data_offset.context("data_offset not defined")?)
+        .context("Data offset is too large")?;
+    let len = usize::try_from(op.data_length.context("data_length not defined")?)
+        .context("Data length is too large")?;
+    let end = offset.checked_add(len).context("Data range overflow")?;
+    payload.data.get(offset..end).context("Data range exceeds payload size")
+}
+
+fn verify_hash(data: &[u8], expected: Option<&[u8]>, label: &str) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = digest::digest(&digest::SHA256, data);
+    ensure!(
+        actual.as_ref() == expected,
+        "{label} hash mismatch: expected {}, got {}",
+        hex::encode(expected),
+        hex::encode(actual.as_ref())
+    );
+    Ok(())
+}
+
+fn verify_hash_over_ranges(
+    data: &[u8],
+    ranges: &[Range<usize>],
+    expected: Option<&[u8]>,
+    label: &str,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let mut context = digest::Context::new(&digest::SHA256);
+    for range in ranges {
+        context.update(&data[range.clone()]);
+    }
+    let actual = context.finish();
+    ensure!(
+        actual.as_ref() == expected,
+        "{label} hash mismatch: expected {}, got {}",
+        hex::encode(expected),
+        hex::encode(actual.as_ref())
+    );
+    Ok(())
+}
+
+fn paths_alias(source: &Path, destination: &Path) -> Result<bool> {
+    let destination_metadata = match fs::metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("Unable to inspect destination partition image: {destination:?}")
+            });
+        }
+    };
+    let source_metadata = fs::metadata(source)
+        .with_context(|| format!("Unable to inspect source partition image: {source:?}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(source_metadata.dev() == destination_metadata.dev()
+            && source_metadata.ino() == destination_metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(fs::canonicalize(source)? == fs::canonicalize(destination)?)
+    }
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("Unable to inspect destination partition image: {path:?}")),
     }
 }
 
@@ -299,6 +670,7 @@ struct Task<'a> {
     verify: bool,
 
     update: &'a PartitionUpdate,
+    source: Option<SourcePartition>,
     op_idx: AtomicUsize,
     partition: SyncUnsafeCell<MmapMut>,
 
@@ -335,6 +707,7 @@ impl Task<'_> {
         Ok(())
     }
 
+    #[allow(deprecated)]
     fn run_op(&self, op: &InstallOperation) -> Result<()> {
         let mut dst_extents =
             self.extract_dst_extents(op).context("Error extracting dst_extents")?;
@@ -363,9 +736,51 @@ impl Task<'_> {
                 self.run_op_replace(&mut decoder, &mut dst_extents)
                     .context("Error in REPLACE_ZSTD operation")
             }
-            Type::Zero => Ok(()), // This is a no-op since the partition is already zeroed
+            Type::SourceCopy => {
+                let source = self.extract_source_data(op)?;
+                self.write_exact(&source, &mut dst_extents)
+                    .context("Error in SOURCE_COPY operation")
+            }
+            Type::Zero | Type::Discard => {
+                for extent in dst_extents {
+                    extent.fill(0);
+                }
+                Ok(())
+            }
+            Type::Move | Type::Bsdiff => {
+                bail!("Deprecated operation is not supported: {:?}", Type::try_from(op.r#type)?)
+            }
             op => bail!("Unimplemented operation: {op:?}"),
         }
+    }
+
+    fn extract_source_data(&self, op: &InstallOperation) -> Result<Vec<u8>> {
+        let source = self.source.as_ref().context("Source partition was not opened")?;
+        let ranges = extent_ranges(&op.src_extents, self.block_size, source.len)?;
+        let capacity = ranges_len(&ranges)?;
+        let mut data = Vec::with_capacity(capacity);
+        for range in ranges {
+            data.extend_from_slice(&source.bytes()[range]);
+        }
+        Ok(data)
+    }
+
+    fn write_exact(&self, data: &[u8], dst_extents: &mut [&mut [u8]]) -> Result<()> {
+        let dst_len = dst_extents.iter().try_fold(0usize, |len, extent| {
+            len.checked_add(extent.len()).context("Combined destination length overflow")
+        })?;
+        ensure!(
+            data.len() == dst_len,
+            "Patched output size mismatch: expected {dst_len}, got {}",
+            data.len()
+        );
+        let mut offset = 0usize;
+        for extent in dst_extents {
+            let end = offset.checked_add(extent.len()).context("Destination offset overflow")?;
+            extent.copy_from_slice(&data[offset..end]);
+            offset = end;
+        }
+        Ok(())
     }
 
     fn run_op_replace(&self, reader: &mut impl Read, dst_extents: &mut [&mut [u8]]) -> Result<()> {
@@ -384,53 +799,38 @@ impl Task<'_> {
                 }
             }
         }
-        ensure!(reader.read(&mut [0])? == 0, "Read fewer bytes than expected");
+        ensure!(reader.read(&mut [0])? == 0, "Decoded data exceeds destination extents");
 
         // Align number of bytes written to block size. The formula for alignment is:
         //   ((operand + alignment - 1) / alignment) * alignment.
-        let bytes_written_aligned = bytes_written.div_ceil(self.block_size).mul(self.block_size);
+        let bytes_written_aligned = bytes_written
+            .checked_add(self.block_size - 1)
+            .context("Decoded data length overflow")?
+            / self.block_size
+            * self.block_size;
         ensure!(bytes_written_aligned == dst_len, "More dst blocks than data, even with padding");
 
         Ok(())
     }
 
-    fn extract_dst_extents(&self, op: &InstallOperation) -> Result<Vec<&'static mut [u8]>> {
+    #[allow(clippy::mut_from_ref)]
+    fn extract_dst_extents(&self, op: &InstallOperation) -> Result<Vec<&mut [u8]>> {
         let partition = unsafe { (*self.partition.get()).as_mut_ptr() };
         let partition_len = unsafe { (&(*self.partition.get())).len() };
+        let ranges = extent_ranges(&op.dst_extents, self.block_size, partition_len)?;
 
-        op.dst_extents
-            .iter()
-            .map(|extent| {
-                let start_block =
-                    extent.start_block.context("start_block not defined in extent")? as usize;
-                let num_blocks =
-                    extent.num_blocks.context("num_blocks not defined in extent")? as usize;
-
-                let partition_offset = start_block * self.block_size;
-                let extent_len = num_blocks * self.block_size;
-
-                ensure!(
-                    partition_offset + extent_len <= partition_len,
-                    "Extent exceeds partition size"
-                );
-                let extent = unsafe {
-                    slice::from_raw_parts_mut(partition.add(partition_offset), extent_len)
-                };
-
-                Ok(extent)
+        // validate_partition rejects overlapping destination ranges before any task starts.
+        // This guarantees that parallel workers never create aliases into the mutable map.
+        Ok(ranges
+            .into_iter()
+            .map(|range| unsafe {
+                slice::from_raw_parts_mut(partition.add(range.start), range.len())
             })
-            .collect()
+            .collect())
     }
 
     fn extract_data<'a>(&'a self, op: &InstallOperation) -> Result<&'a [u8]> {
-        let data_len = op.data_length.context("data_length not defined")? as usize;
-        let data = {
-            let offset = op.data_offset.context("data_offset not defined")? as usize;
-            self.payload
-                .data
-                .get(offset..offset + data_len)
-                .context("Data offset exceeds payload size")?
-        };
+        let data = extract_operation_data(self.payload, op)?;
         self.verify_op(op, data)?;
         Ok(data)
     }
@@ -439,30 +839,16 @@ impl Task<'_> {
         if !self.verify {
             return Ok(());
         }
-        let Some(exp_hash) = &op.data_sha256_hash else {
-            return Ok(());
-        };
-
-        let got_hash = digest::digest(&digest::SHA256, data);
-        let got_hash = got_hash.as_ref();
-        ensure!(
-            got_hash == exp_hash,
-            "Input verification failed: hash mismatch: expected {}, got {got_hash:?}",
-            hex::encode(exp_hash)
-        );
-        Ok(())
+        verify_hash(data, op.data_sha256_hash.as_deref(), "Input")
     }
 
     fn verify_partition(&self) -> Result<()> {
-        if !self.verify {
-            return Ok(());
-        }
-
-        let Some(exp_hash) =
-            self.update.new_partition_info.as_ref().and_then(|info| info.hash.as_ref())
-        else {
-            return Ok(());
-        };
+        let exp_hash = self
+            .update
+            .new_partition_info
+            .as_ref()
+            .and_then(|info| info.hash.as_ref())
+            .context("Unable to determine output partition hash")?;
 
         let mut digest = digest::Context::new(&digest::SHA256);
         for chunk in unsafe { (*self.partition.get()).chunks(VERIFY_CHUNK_SIZE) } {

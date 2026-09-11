@@ -10,6 +10,7 @@ create_exception!(otadump, OtaDumpError, PyException);
 
 /// Extract partitions from an Android OTA payload or OTA ZIP.
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (
     payload_file,
     output_dir,
@@ -18,6 +19,7 @@ create_exception!(otadump, OtaDumpError, PyException);
     overwrite = false,
     partitions = None,
     verify = true,
+    source_dir = None,
 ))]
 fn extract(
     py: Python<'_>,
@@ -27,6 +29,7 @@ fn extract(
     overwrite: bool,
     partitions: Option<Vec<String>>,
     verify: bool,
+    source_dir: Option<PathBuf>,
 ) -> PyResult<()> {
     let mut options = ExtractOptions::new();
     options.overwrite(overwrite).verify(verify);
@@ -36,6 +39,9 @@ fn extract(
     }
     if let Some(partitions) = partitions {
         options.partitions(partitions);
+    }
+    if let Some(source_dir) = source_dir {
+        options.source_dir(source_dir);
     }
 
     py.detach(move || {

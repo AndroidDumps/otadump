@@ -80,6 +80,9 @@ otadump ota.zip
 
 # Run on payload.bin file.
 otadump payload.bin
+
+# Apply a SOURCE_COPY delta payload with matching base partition images.
+otadump delta.zip --output-dir output --source-dir source-images
 ```
 
 ### Python
@@ -97,11 +100,13 @@ otadump.extract(
     Path("output"),
     partitions=["boot", "system"],
     overwrite=True,
+    source_dir=Path("source-images"),
 )
 ```
 
-The optional keyword arguments are `num_threads`, `overwrite`, `partitions`,
-and `verify`. Extraction releases the Python GIL.
+The optional keyword arguments are `num_threads`, `overwrite`, `partitions`, `verify`, and `source_dir`.
+Set `source_dir` to a directory containing matching base partition images for supported delta operations.
+Extraction releases the Python GIL.
 
 ## Contributors
 

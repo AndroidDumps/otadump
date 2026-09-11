@@ -39,6 +39,10 @@ pub struct Args {
     /// Path to the output directory
     #[clap(long)]
     pub output_dir: String,
+
+    /// Directory containing source partition images for delta payloads
+    #[clap(long)]
+    pub source_dir: Option<String>,
 }
 
 pub fn extract() {
@@ -47,9 +51,12 @@ pub fn extract() {
     let reporter = Box::new(CliProgressReporter::new());
     let reporter = reporter.as_ref();
 
-    let result = ExtractOptions::new()
-        .progress_reporter(reporter)
-        .extract(&args.payload_file, &args.output_dir);
+    let mut options = ExtractOptions::new();
+    options.progress_reporter(reporter);
+    if let Some(source_dir) = &args.source_dir {
+        options.source_dir(source_dir);
+    }
+    let result = options.extract(&args.payload_file, &args.output_dir);
     reporter.progress_bar.finish_and_clear();
     match result {
         Ok(()) => {
