@@ -1110,7 +1110,7 @@ impl Task<'_> {
     }
 }
 
-fn decode_zucchini_patch(
+pub(crate) fn decode_zucchini_patch(
     compressed_patch: &[u8],
     cancellation_token: &CancellationToken,
 ) -> Result<Vec<u8>> {

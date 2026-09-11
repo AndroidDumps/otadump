@@ -37,6 +37,7 @@ pub(crate) enum Error {
     InvalidMetadata(String),
     Corrupt(String),
     Bsdiff(String),
+    Zucchini(String),
     SizeMismatch { expected: usize, actual: usize },
     Allocation(String),
     Cancelled(ExtractionCancelled),
@@ -59,6 +60,9 @@ impl fmt::Display for Error {
             }
             Self::Corrupt(message) => write!(formatter, "corrupt Puffin stream: {message}"),
             Self::Bsdiff(message) => write!(formatter, "inner BSDIFF patch is invalid: {message}"),
+            Self::Zucchini(message) => {
+                write!(formatter, "inner ZUCCHINI patch is invalid: {message}")
+            }
             Self::SizeMismatch { expected, actual } => {
                 write!(formatter, "PUFFDIFF size mismatch: expected {expected}, got {actual}")
             }

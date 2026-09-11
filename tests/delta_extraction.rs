@@ -184,6 +184,14 @@ fn with_puffin_patch_type(patch: &[u8], patch_type: u8) -> Vec<u8> {
     changed
 }
 
+fn with_puffin_inner_patch(patch: &[u8], inner_patch: &[u8]) -> Vec<u8> {
+    let header_len = u32::from_be_bytes(patch[4..8].try_into().unwrap()) as usize;
+    let mut changed = Vec::with_capacity(8 + header_len + inner_patch.len());
+    changed.extend_from_slice(&patch[..8 + header_len]);
+    changed.extend_from_slice(inner_patch);
+    changed
+}
+
 #[test]
 fn puffdiff_bsdiff_reconstructs_pinned_puffin_goldens() {
     let source = puffin_fixture("deflates-sample1.bin");
@@ -196,6 +204,18 @@ fn puffdiff_bsdiff_reconstructs_pinned_puffin_goldens() {
         let output = run_puffdiff_extraction(&source, &target, &patch).unwrap();
         assert_eq!(output, target);
     }
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn puffdiff_zucchini_reconstructs_pinned_puffin_golden() {
+    let source = puffin_fixture("deflates-sample1.bin");
+    let target = puffin_fixture("deflates-sample2.bin");
+    let patch = puffin_fixture("patch-1-to-2-zucchini.puf");
+
+    let output = run_puffdiff_extraction(&source, &target, &patch).unwrap();
+
+    assert_eq!(output, target);
 }
 
 #[test]
@@ -235,7 +255,6 @@ fn malformed_puffdiff_data_fails_without_publication_or_process_failure() {
         (non_byte_puff, "puff extent is not byte-aligned"),
         (overlapping_deflates, "deflate extents overlap or are unsorted"),
         (bad_inner_bsdiff, "inner BSDIFF patch is invalid"),
-        (with_puffin_patch_type(&valid_patch, 1), "unsupported PUFFDIFF patch type 1"),
         (with_puffin_patch_type(&valid_patch, 2), "unsupported PUFFDIFF patch type 2"),
     ] {
         let error = run_puffdiff_extraction(&source, &target, &patch).unwrap_err();
@@ -245,6 +264,30 @@ fn malformed_puffdiff_data_fails_without_publication_or_process_failure() {
     let short_target = &target[..target.len() - 1];
     let error = run_puffdiff_extraction(&source, short_target, &valid_patch).unwrap_err();
     assert!(error.contains("destination raw size mismatch"), "unexpected error: {error}");
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
+fn malformed_puffdiff_zucchini_fails_without_publication_or_process_failure() {
+    let source = puffin_fixture("deflates-sample1.bin");
+    let target = puffin_fixture("deflates-sample2.bin");
+    let valid_patch = puffin_fixture("patch-1-to-2-zucchini.puf");
+    let malformed_zucchini =
+        fs::read(Path::new("tests/fixtures/zucchini/malformed-zucchini.zuc.br")).unwrap();
+
+    for (patch, expected_error) in [
+        (
+            with_puffin_inner_patch(&valid_patch, b"not a Brotli stream\n"),
+            "Unable to decode ZUCCHINI Brotli patch",
+        ),
+        (
+            with_puffin_inner_patch(&valid_patch, &malformed_zucchini),
+            "inner ZUCCHINI patch is invalid: apply failed: invalid ensemble patch",
+        ),
+    ] {
+        let error = run_puffdiff_extraction(&source, &target, &patch).unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+    }
 }
 
 #[cfg(otadump_zucchini)]

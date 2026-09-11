@@ -10,10 +10,14 @@ use brotli::Decompressor as BrotliDecoder;
 use bzip2::read::BzDecoder;
 
 use crate::puffin::{BitExtent, ByteExtent, Error, Result, check_cancelled, stream};
-use crate::{CancellationToken, validate_bsdiff_output_len, zucchini};
+use crate::{
+    CancellationToken, ExtractionCancelled, decode_zucchini_patch, is_cancellation,
+    validate_bsdiff_output_len, zucchini,
+};
 
 const MAGIC: &[u8; 4] = b"PUF1";
 const PATCH_TYPE_BSDIFF: i32 = 0;
+const PATCH_TYPE_ZUCCHINI: i32 = 1;
 const DECODE_CHUNK_SIZE: usize = 32 * 1024;
 
 #[derive(Clone, Copy)]
@@ -474,7 +478,7 @@ pub fn apply(
         .get(8..header_end)
         .ok_or_else(|| Error::BadPatchHeader("protobuf header overruns patch".into()))?;
     let header = parse_header(header_bytes)?;
-    if header.patch_type != PATCH_TYPE_BSDIFF {
+    if !matches!(header.patch_type, PATCH_TYPE_BSDIFF | PATCH_TYPE_ZUCCHINI) {
         return Err(Error::UnsupportedPatchType(header.patch_type));
     }
     validate_stream(&header.source, source.len(), "source")?;
@@ -493,15 +497,37 @@ pub fn apply(
     )?;
 
     check_cancelled(cancellation_token)?;
-    validate_bsdiff_output_len(raw_patch, header.destination.puff_length)
-        .map_err(|error| Error::Bsdiff(error.to_string()))?;
-    validate_inner_bsdiff_resources(raw_patch, header.destination.puff_length, cancellation_token)?;
-    let mut puffed_destination = Vec::new();
-    puffed_destination
-        .try_reserve_exact(header.destination.puff_length)
-        .map_err(|error| Error::Allocation(format!("puffed destination: {error}")))?;
-    bsdiff_android::patch_bsdf2(&puffed_source, raw_patch, &mut puffed_destination)
-        .map_err(|error| Error::Bsdiff(error.to_string()))?;
+    let puffed_destination = if header.patch_type == PATCH_TYPE_BSDIFF {
+        validate_bsdiff_output_len(raw_patch, header.destination.puff_length)
+            .map_err(|error| Error::Bsdiff(error.to_string()))?;
+        validate_inner_bsdiff_resources(
+            raw_patch,
+            header.destination.puff_length,
+            cancellation_token,
+        )?;
+        let mut destination = Vec::new();
+        destination
+            .try_reserve_exact(header.destination.puff_length)
+            .map_err(|error| Error::Allocation(format!("puffed destination: {error}")))?;
+        bsdiff_android::patch_bsdf2(&puffed_source, raw_patch, &mut destination)
+            .map_err(|error| Error::Bsdiff(error.to_string()))?;
+        destination
+    } else {
+        let zucchini_patch =
+            decode_zucchini_patch(raw_patch, cancellation_token).map_err(|error| {
+                if is_cancellation(error.as_ref()) {
+                    Error::Cancelled(ExtractionCancelled)
+                } else {
+                    Error::Zucchini(error.to_string())
+                }
+            })?;
+        check_cancelled(cancellation_token)?;
+        let destination =
+            zucchini::apply(&puffed_source, &zucchini_patch, header.destination.puff_length)
+                .map_err(|error| Error::Zucchini(format!("apply failed: {error}")))?;
+        check_cancelled(cancellation_token)?;
+        destination
+    };
     if puffed_destination.len() != header.destination.puff_length {
         return Err(Error::SizeMismatch {
             expected: header.destination.puff_length,
