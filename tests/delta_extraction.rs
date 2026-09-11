@@ -55,6 +55,20 @@ struct PartitionUpdate {
     new_partition_info: Option<PartitionInfo>,
     #[prost(message, repeated, tag = "8")]
     operations: Vec<InstallOperation>,
+    #[prost(message, optional, tag = "10")]
+    hash_tree_data_extent: Option<Extent>,
+    #[prost(message, optional, tag = "11")]
+    hash_tree_extent: Option<Extent>,
+    #[prost(string, optional, tag = "12")]
+    hash_tree_algorithm: Option<String>,
+    #[prost(bytes = "vec", optional, tag = "13")]
+    hash_tree_salt: Option<Vec<u8>>,
+    #[prost(message, optional, tag = "14")]
+    fec_data_extent: Option<Extent>,
+    #[prost(message, optional, tag = "15")]
+    fec_extent: Option<Extent>,
+    #[prost(uint32, optional, tag = "16")]
+    fec_roots: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -137,6 +151,7 @@ fn source_copy_reconstructs_noncontiguous_extents_without_modifying_source() {
             old_partition_info: Some(partition_info(source)),
             new_partition_info: Some(partition_info(expected)),
             operations: vec![operation],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -179,6 +194,7 @@ fn source_bsdiff_reconstructs_bsdiff40_without_modifying_source() {
                 data_sha256_hash: Some(sha256(BSDIFF40_PATCH)),
                 src_sha256_hash: Some(sha256(source)),
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -221,6 +237,7 @@ fn brotli_bsdiff_reconstructs_bsdf2_without_modifying_source() {
                 data_sha256_hash: Some(sha256(BROTLI_BSDF2_PATCH)),
                 src_sha256_hash: Some(sha256(source)),
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -266,6 +283,7 @@ fn malformed_bsdiff_headers_fail_cleanly_and_remove_staging() {
                     data_sha256_hash: Some(sha256(patch)),
                     src_sha256_hash: Some(sha256(source)),
                 }],
+                ..Default::default()
             }],
         };
         let payload = temporary.path().join("payload.bin");
@@ -306,6 +324,7 @@ fn source_validation_rejects_wrong_base_before_creating_output() {
             old_partition_info: Some(partition_info(b"good")),
             new_partition_info: Some(partition_info(b"good")),
             operations: vec![operation],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -346,6 +365,7 @@ fn padded_source_uses_declared_prefix_without_modifying_tail() {
                 src_sha256_hash: Some(sha256(declared_source)),
                 ..Default::default()
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -379,6 +399,7 @@ fn source_shorter_than_declared_size_fails_cleanly() {
                 dst_extents: vec![extent(0, 1)],
                 ..Default::default()
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -420,6 +441,7 @@ fn source_extent_cannot_enter_padding_beyond_declared_size() {
                 src_sha256_hash: Some(sha256(b"foot")),
                 ..Default::default()
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -453,6 +475,7 @@ fn delta_operation_without_source_directory_fails_clearly() {
                 dst_extents: vec![extent(0, 1)],
                 ..Default::default()
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -510,6 +533,7 @@ fn malformed_partition_layouts_fail_without_escaping_or_leaving_partial_images()
                 old_partition_info: None,
                 new_partition_info: Some(partition_info(target)),
                 operations,
+                ..Default::default()
             }],
         };
         let payload = temporary.path().join("payload.bin");
@@ -546,6 +570,7 @@ fn full_replace_payload_remains_compatible() {
             old_partition_info: None,
             new_partition_info: Some(partition_info(&padded)),
             operations: vec![operation],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -554,6 +579,191 @@ fn full_replace_payload_remains_compatible() {
     ExtractOptions::new().extract(&payload, &output_dir).unwrap();
 
     assert_eq!(fs::read(output_dir.join("vendor.img")).unwrap(), padded);
+}
+
+#[test]
+fn omitted_verity_tree_is_generated_in_aosp_top_down_order() {
+    const LEAF_HASHES: [[u8; 32]; 5] = [
+        [
+            0x2b, 0xbf, 0x03, 0x32, 0xe3, 0x58, 0xa6, 0xa5, 0xdd, 0xc7, 0x3e, 0xa7, 0x1e, 0x75,
+            0xdc, 0x83, 0xf5, 0x8f, 0xec, 0xfc, 0x25, 0x4a, 0x4e, 0x7d, 0x41, 0x33, 0x86, 0x95,
+            0x8b, 0xd9, 0xe0, 0x00,
+        ],
+        [
+            0x24, 0x59, 0x0e, 0xd6, 0xcb, 0x84, 0x1e, 0xa2, 0xe5, 0xd8, 0x39, 0xe7, 0xc6, 0x3d,
+            0xb6, 0x9b, 0x75, 0x50, 0xb4, 0x88, 0x60, 0x7a, 0xf2, 0x52, 0x75, 0x53, 0x0a, 0x5e,
+            0x62, 0xce, 0x21, 0x7c,
+        ],
+        [
+            0xf1, 0x06, 0x4b, 0x13, 0x33, 0x00, 0xf3, 0x86, 0x53, 0x23, 0x3e, 0x15, 0x04, 0x99,
+            0x74, 0x81, 0xa0, 0x0b, 0xa8, 0xa1, 0x17, 0xd2, 0x0e, 0xd6, 0xae, 0x58, 0xc6, 0x75,
+            0x8e, 0x69, 0x39, 0xcc,
+        ],
+        [
+            0xda, 0x97, 0xb2, 0x05, 0xf9, 0xe7, 0xa3, 0xad, 0x12, 0x0d, 0xf3, 0xb2, 0x03, 0x14,
+            0xe2, 0x07, 0x1b, 0xb0, 0xfb, 0x0f, 0x87, 0x0f, 0x95, 0x21, 0xe0, 0xb2, 0xf9, 0x89,
+            0x1e, 0xe6, 0x9b, 0xe8,
+        ],
+        [
+            0xa7, 0xd9, 0xa0, 0xf7, 0xbf, 0xe5, 0xfa, 0x24, 0x7c, 0x32, 0x31, 0x87, 0x01, 0x9d,
+            0x01, 0x25, 0xf6, 0x93, 0xf0, 0xcd, 0xf4, 0x70, 0x93, 0xa2, 0xf1, 0x39, 0x2b, 0x3f,
+            0x57, 0xb9, 0xfb, 0x0b,
+        ],
+    ];
+    const UPPER_HASHES: [[u8; 32]; 2] = [
+        [
+            0x73, 0x55, 0xdf, 0xc2, 0xeb, 0x76, 0xd2, 0xb4, 0x0d, 0x27, 0xe3, 0x8c, 0x41, 0x40,
+            0x35, 0xa2, 0x7c, 0x5a, 0x8c, 0x95, 0x90, 0x2d, 0xdf, 0x77, 0xbb, 0x87, 0x69, 0x46,
+            0x96, 0xd6, 0x1b, 0x91,
+        ],
+        [
+            0xfe, 0xb1, 0x40, 0xb5, 0x15, 0x40, 0xbf, 0x36, 0x30, 0x8d, 0xce, 0x5c, 0x31, 0x08,
+            0x45, 0xe4, 0x12, 0x51, 0x2e, 0xc6, 0x53, 0xf9, 0x2b, 0x4e, 0x31, 0x09, 0x30, 0x7f,
+            0xab, 0x5e, 0x16, 0xe1,
+        ],
+    ];
+
+    let temporary = TempDir::new().unwrap();
+    let output_dir = temporary.path().join("output");
+    let block_size = 128usize;
+    let mut data = Vec::with_capacity(5 * block_size);
+    for byte in [0x11, 0x22, 0x33, 0x44, 0x55] {
+        data.extend(std::iter::repeat_n(byte, block_size));
+    }
+    let mut expected_tree = Vec::with_capacity(3 * block_size);
+    expected_tree.extend(UPPER_HASHES.into_iter().flatten());
+    expected_tree.resize(block_size, 0);
+    expected_tree.extend(LEAF_HASHES[..4].iter().flatten());
+    expected_tree.extend(LEAF_HASHES[4]);
+    expected_tree.resize(3 * block_size, 0);
+    let mut expected = data.clone();
+    expected.extend_from_slice(&expected_tree);
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(block_size as u32),
+        minor_version: Some(6),
+        partitions: vec![PartitionUpdate {
+            partition_name: "vendor".into(),
+            old_partition_info: None,
+            new_partition_info: Some(partition_info(&expected)),
+            operations: vec![InstallOperation {
+                operation_type: 0,
+                data_offset: Some(0),
+                data_length: Some(data.len() as u64),
+                dst_extents: vec![extent(0, 5)],
+                dst_length: Some(data.len() as u64),
+                data_sha256_hash: Some(sha256(&data)),
+                ..Default::default()
+            }],
+            hash_tree_data_extent: Some(extent(0, 5)),
+            hash_tree_extent: Some(extent(5, 3)),
+            hash_tree_algorithm: Some("sha256".into()),
+            hash_tree_salt: Some(b"verity-test-salt".to_vec()),
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &data);
+
+    ExtractOptions::new().num_threads(4).extract(&payload, &output_dir).unwrap();
+
+    let actual = fs::read(output_dir.join("vendor.img")).unwrap();
+    assert_eq!(&actual[5 * block_size..], expected_tree);
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn malformed_verity_layouts_fail_without_leaving_staging_files() {
+    for (tree_extent, operations, expected_error) in [
+        (
+            extent(5, 2),
+            vec![InstallOperation {
+                operation_type: 0,
+                data_offset: Some(0),
+                data_length: Some(5 * 128),
+                dst_extents: vec![extent(0, 5)],
+                ..Default::default()
+            }],
+            "Hash tree size mismatch",
+        ),
+        (
+            extent(5, 3),
+            vec![
+                InstallOperation {
+                    operation_type: 0,
+                    data_offset: Some(0),
+                    data_length: Some(5 * 128),
+                    dst_extents: vec![extent(0, 5)],
+                    ..Default::default()
+                },
+                InstallOperation {
+                    operation_type: 6,
+                    dst_extents: vec![extent(5, 1)],
+                    ..Default::default()
+                },
+            ],
+            "Hash tree extent overlaps destination extents",
+        ),
+    ] {
+        let temporary = TempDir::new().unwrap();
+        let output_dir = temporary.path().join("output");
+        let data = vec![0x5a; 5 * 128];
+        let manifest = DeltaArchiveManifest {
+            block_size: Some(128),
+            minor_version: Some(6),
+            partitions: vec![PartitionUpdate {
+                partition_name: "vendor".into(),
+                new_partition_info: Some(partition_info(&vec![0; 8 * 128])),
+                operations,
+                hash_tree_data_extent: Some(extent(0, 5)),
+                hash_tree_extent: Some(tree_extent),
+                hash_tree_algorithm: Some("sha256".into()),
+                hash_tree_salt: Some(vec![0x23; 32]),
+                ..Default::default()
+            }],
+        };
+        let payload = temporary.path().join("payload.bin");
+        write_payload(&payload, manifest, &data);
+
+        let error = ExtractOptions::new().extract(&payload, &output_dir).unwrap_err().to_string();
+
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+        assert!(!output_dir.join("vendor.img").exists());
+        assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+    }
+}
+
+#[test]
+fn fec_metadata_fails_explicitly_without_publishing_an_image() {
+    let temporary = TempDir::new().unwrap();
+    let output_dir = temporary.path().join("output");
+    let data = vec![0x5a; 128];
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(128),
+        minor_version: Some(6),
+        partitions: vec![PartitionUpdate {
+            partition_name: "vendor".into(),
+            new_partition_info: Some(partition_info(&vec![0; 256])),
+            operations: vec![InstallOperation {
+                operation_type: 0,
+                data_offset: Some(0),
+                data_length: Some(128),
+                dst_extents: vec![extent(0, 1)],
+                ..Default::default()
+            }],
+            fec_data_extent: Some(extent(0, 1)),
+            fec_extent: Some(extent(1, 1)),
+            fec_roots: Some(2),
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &data);
+
+    let error = ExtractOptions::new().extract(&payload, &output_dir).unwrap_err().to_string();
+
+    assert!(error.contains("FEC generation is not supported"), "unexpected error: {error}");
+    assert!(!output_dir.join("vendor.img").exists());
+    assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
 }
 
 #[test]
@@ -577,6 +787,7 @@ fn verified_partitions_are_promoted_after_all_succeed() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             },
             PartitionUpdate {
                 partition_name: "vendor".into(),
@@ -589,6 +800,7 @@ fn verified_partitions_are_promoted_after_all_succeed() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             },
         ],
     };
@@ -625,6 +837,7 @@ fn no_clobber_rejects_existing_destination_without_modifying_source() {
                 dst_extents: vec![extent(0, 1)],
                 ..Default::default()
             }],
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -664,6 +877,7 @@ fn verification_failure_preserves_existing_destinations_with_overwrite() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             },
             PartitionUpdate {
                 partition_name: "vendor".into(),
@@ -676,6 +890,7 @@ fn verification_failure_preserves_existing_destinations_with_overwrite() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             },
         ],
     };
@@ -714,6 +929,7 @@ fn partition_selection_does_not_require_unselected_delta_sources() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             },
             PartitionUpdate {
                 partition_name: "system".into(),
@@ -725,6 +941,7 @@ fn partition_selection_does_not_require_unselected_delta_sources() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             },
         ],
     };
@@ -779,6 +996,7 @@ fn cancellation_cleans_staging_without_promoting_or_modifying_source() {
             old_partition_info: Some(partition_info(&source)),
             new_partition_info: Some(partition_info(&source)),
             operations,
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -830,6 +1048,7 @@ fn cli_extraction_error_exits_nonzero_and_reports_diagnostic() {
                 dst_extents: vec![extent(0, 1)],
                 ..Default::default()
             }],
+            ..Default::default()
         }],
     };
     write_payload(&payload, manifest, &[]);
@@ -882,6 +1101,7 @@ fn cli_sigint_exits_130_after_cleaning_staging() {
             old_partition_info: Some(partition_info(&source)),
             new_partition_info: Some(partition_info(&source)),
             operations,
+            ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
@@ -966,6 +1186,7 @@ fn source_and_destination_aliases_are_rejected_without_modifying_the_source() {
                     dst_extents: vec![extent(0, 1)],
                     ..Default::default()
                 }],
+                ..Default::default()
             }],
         };
         let payload = temporary.path().join("payload.bin");

@@ -6,10 +6,11 @@ mod chromeos_update_engine {
 mod payload;
 #[cfg(feature = "python")]
 mod python;
+mod verity;
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::num::NonZero;
 use std::ops::Range;
@@ -26,7 +27,7 @@ use chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUp
 use liblzma::read::XzDecoder;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use prost::Message as _;
-use rayon::{BroadcastContext, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use ring::digest;
 use sync_unsafe_cell::SyncUnsafeCell;
 use tempfile::TempPath;
@@ -126,7 +127,7 @@ impl<'a> ExtractOptions<'a> {
         let output_dir = output_dir.as_ref();
         match self.extract_impl(payload_file, output_dir) {
             Ok(()) => Ok(()),
-            Err(error) if error.is::<ExtractionCancelled>() => Err(Box::new(ExtractionCancelled)),
+            Err(error) if is_cancellation(error.as_ref()) => Err(Box::new(ExtractionCancelled)),
             Err(error) => Err(error.into()),
         }
     }
@@ -183,11 +184,12 @@ impl<'a> ExtractOptions<'a> {
         fs::create_dir_all(output_dir)
             .with_context(|| format!("Could not create output directory: {output_dir:?}"))?;
 
-        let sources = manifest
+        let validated = manifest
             .partitions
             .iter()
             .map(|update| self.validate_partition(update, &payload, block_size))
             .collect::<Result<Vec<_>>>()?;
+        let (sources, verity_configs): (Vec<_>, Vec<_>) = validated.into_iter().unzip();
 
         let mut partition_names = HashSet::with_capacity(manifest.partitions.len());
         let mut destinations = Vec::with_capacity(manifest.partitions.len());
@@ -269,8 +271,8 @@ impl<'a> ExtractOptions<'a> {
                     cancellation_token: &self.cancellation_token,
                     error: &error,
                 };
-                scope.spawn_broadcast(move |_, ctx| {
-                    if let Err(e) = task.run(ctx) {
+                scope.spawn_broadcast(move |_, _| {
+                    if let Err(e) = task.run() {
                         _ = task.error.set(e);
                     }
                 });
@@ -280,6 +282,42 @@ impl<'a> ExtractOptions<'a> {
         self.cancellation_token.check()?;
         if let Some(e) = error.take() {
             return Err(e);
+        }
+
+        for ((update, verity_config), staging_path) in
+            manifest.partitions.iter().zip(verity_configs).zip(&staging_paths)
+        {
+            self.cancellation_token.check()?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(staging_path)
+                .context("Unable to reopen staged partition image")?;
+            let mut partition = unsafe { MmapMut::map_mut(&file) }
+                .context("Failed to mmap staged partition image")?;
+            if let Some(config) = verity_config.as_ref() {
+                verity::generate(&mut partition, config, block_size, &self.cancellation_token)
+                    .map_err(|error| {
+                        if is_cancellation(error.as_ref()) {
+                            error
+                        } else {
+                            error.context(format!(
+                                "Failed to generate hash tree for {:?}",
+                                update.partition_name
+                            ))
+                        }
+                    })?;
+            }
+            verify_partition(
+                update,
+                &partition,
+                total_ops,
+                &total_ops_completed,
+                self.progress_reporter,
+                &self.cancellation_token,
+            )?;
+            self.cancellation_token.check()?;
+            partition.flush().context("Error while flushing file to disk")?;
         }
 
         for (staging_path, destination) in staging_paths.into_iter().zip(destinations) {
@@ -349,7 +387,7 @@ impl<'a> ExtractOptions<'a> {
         update: &PartitionUpdate,
         payload: &Payload<'_>,
         block_size: usize,
-    ) -> Result<Option<SourcePartition>> {
+    ) -> Result<(Option<SourcePartition>, Option<verity::VerityConfig>)> {
         validate_partition_name(&update.partition_name)?;
         self.cancellation_token.check()?;
 
@@ -447,7 +485,12 @@ impl<'a> ExtractOptions<'a> {
             );
         }
 
-        Ok(source)
+        let verity = verity::validate(update, block_size, partition_len, &destination_ranges)
+            .map_err(|error| {
+                anyhow::anyhow!("Invalid verity metadata for {:?}: {error}", update.partition_name)
+            })?;
+
+        Ok((source, verity))
     }
 
     fn open_source_partition(&self, update: &PartitionUpdate) -> Result<SourcePartition> {
@@ -791,7 +834,7 @@ struct Task<'a> {
 }
 
 impl Task<'_> {
-    fn run(&self, ctx: BroadcastContext<'_>) -> Result<()> {
+    fn run(&self) -> Result<()> {
         // If an error has already occurred, stop processing the partition.
         while self.error.get().is_none() {
             self.cancellation_token.check()?;
@@ -803,16 +846,6 @@ impl Task<'_> {
                     self.increment_progress();
                 }
                 None => {
-                    // If this is the last thread to fetch an operation for this
-                    // partition, the partition is fully extracted and can now be
-                    // verified.
-                    if op_idx + 1 == self.update.operations.len() + ctx.num_threads() {
-                        self.cancellation_token.check()?;
-                        self.verify_partition()?;
-                        self.cancellation_token.check()?;
-                        unsafe { (*self.partition.get()).flush() }
-                            .context("Error while flushing file to disk")?;
-                    };
                     break;
                 }
             }
@@ -1001,38 +1034,52 @@ impl Task<'_> {
         verify_hash(data, op.data_sha256_hash.as_deref(), "Input", self.cancellation_token)
     }
 
-    fn verify_partition(&self) -> Result<()> {
-        let exp_hash = self
-            .update
-            .new_partition_info
-            .as_ref()
-            .and_then(|info| info.hash.as_ref())
-            .context("Unable to determine output partition hash")?;
+    fn increment_progress(&self) {
+        increment_progress(self.total_ops, self.total_ops_completed, self.progress_reporter);
+    }
+}
 
-        let mut digest = digest::Context::new(&digest::SHA256);
-        for chunk in unsafe { (*self.partition.get()).chunks(VERIFY_CHUNK_SIZE) } {
-            self.cancellation_token.check()?;
-            digest.update(chunk);
-            self.increment_progress();
-        }
+fn verify_partition(
+    update: &PartitionUpdate,
+    partition: &[u8],
+    total_ops: usize,
+    total_ops_completed: &AtomicUsize,
+    progress_reporter: &dyn ProgressReporter,
+    cancellation_token: &CancellationToken,
+) -> Result<()> {
+    let exp_hash = update
+        .new_partition_info
+        .as_ref()
+        .and_then(|info| info.hash.as_ref())
+        .context("Unable to determine output partition hash")?;
 
-        self.cancellation_token.check()?;
-        let got_hash = digest.finish();
-        let got_hash = got_hash.as_ref();
-        ensure!(
-            got_hash == exp_hash,
-            "Output verification failed: hash mismatch: expected {}, got {got_hash:?}",
-            hex::encode(exp_hash)
-        );
-        Ok(())
+    let mut context = digest::Context::new(&digest::SHA256);
+    for chunk in partition.chunks(VERIFY_CHUNK_SIZE) {
+        cancellation_token.check()?;
+        context.update(chunk);
+        increment_progress(total_ops, total_ops_completed, progress_reporter);
     }
 
-    fn increment_progress(&self) {
-        let total_ops_completed = self.total_ops_completed.fetch_add(1, Ordering::Relaxed) + 1;
-        if total_ops_completed % 16 == 0 {
-            let progress = total_ops_completed as f64 / self.total_ops as f64;
-            self.progress_reporter.report_progress(progress);
-        }
+    cancellation_token.check()?;
+    let got_hash = context.finish();
+    ensure!(
+        got_hash.as_ref() == exp_hash,
+        "Output verification failed: hash mismatch: expected {}, got {}",
+        hex::encode(exp_hash),
+        hex::encode(got_hash.as_ref())
+    );
+    Ok(())
+}
+
+fn increment_progress(
+    total_ops: usize,
+    total_ops_completed: &AtomicUsize,
+    progress_reporter: &dyn ProgressReporter,
+) {
+    let total_ops_completed = total_ops_completed.fetch_add(1, Ordering::Relaxed) + 1;
+    if total_ops_completed % 16 == 0 {
+        let progress = total_ops_completed as f64 / total_ops as f64;
+        progress_reporter.report_progress(progress);
     }
 }
 
