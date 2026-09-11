@@ -322,6 +322,121 @@ fn source_validation_rejects_wrong_base_before_creating_output() {
 }
 
 #[test]
+fn padded_source_uses_declared_prefix_without_modifying_tail() {
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    let declared_source = b"base";
+    let source = b"basefooter";
+    fs::write(source_dir.join("system.img"), source).unwrap();
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(4),
+        minor_version: Some(2),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(declared_source)),
+            new_partition_info: Some(partition_info(declared_source)),
+            operations: vec![InstallOperation {
+                operation_type: 4,
+                src_extents: vec![extent(0, 1)],
+                src_length: Some(4),
+                dst_extents: vec![extent(0, 1)],
+                dst_length: Some(4),
+                src_sha256_hash: Some(sha256(declared_source)),
+                ..Default::default()
+            }],
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &[]);
+
+    ExtractOptions::new().source_dir(&source_dir).extract(&payload, &output_dir).unwrap();
+
+    assert_eq!(fs::read(output_dir.join("system.img")).unwrap(), declared_source);
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+}
+
+#[test]
+fn source_shorter_than_declared_size_fails_cleanly() {
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    let source = b"bas";
+    fs::write(source_dir.join("system.img"), source).unwrap();
+    let declared_source = b"base";
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(4),
+        minor_version: Some(2),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(declared_source)),
+            new_partition_info: Some(partition_info(declared_source)),
+            operations: vec![InstallOperation {
+                operation_type: 4,
+                src_extents: vec![extent(0, 1)],
+                dst_extents: vec![extent(0, 1)],
+                ..Default::default()
+            }],
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &[]);
+
+    let error = ExtractOptions::new()
+        .source_dir(&source_dir)
+        .extract(&payload, &output_dir)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("Source partition size mismatch"), "unexpected error: {error}");
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+    assert!(!output_dir.join("system.img").exists());
+}
+
+#[test]
+fn source_extent_cannot_enter_padding_beyond_declared_size() {
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    let declared_source = b"base";
+    let source = b"basefoot";
+    fs::write(source_dir.join("system.img"), source).unwrap();
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(4),
+        minor_version: Some(2),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(declared_source)),
+            new_partition_info: Some(partition_info(declared_source)),
+            operations: vec![InstallOperation {
+                operation_type: 4,
+                src_extents: vec![extent(1, 1)],
+                src_length: Some(4),
+                dst_extents: vec![extent(0, 1)],
+                dst_length: Some(4),
+                src_sha256_hash: Some(sha256(b"foot")),
+                ..Default::default()
+            }],
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &[]);
+
+    let error = ExtractOptions::new()
+        .source_dir(&source_dir)
+        .extract(&payload, &output_dir)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("Invalid source extents"), "unexpected error: {error}");
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+    assert!(!output_dir.join("system.img").exists());
+}
+
+#[test]
 fn delta_operation_without_source_directory_fails_clearly() {
     let temporary = TempDir::new().unwrap();
     let output_dir = temporary.path().join("output");

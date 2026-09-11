@@ -464,8 +464,18 @@ impl<'a> ExtractOptions<'a> {
             .metadata()
             .with_context(|| format!("Unable to inspect source partition image: {path:?}"))?;
         ensure!(metadata.is_file(), "Source partition image is not a file: {path:?}");
-        let len = usize::try_from(metadata.len()).context("Source partition is too large")?;
-        let mmap = if len == 0 {
+        let backing_len =
+            usize::try_from(metadata.len()).context("Source partition is too large")?;
+        let info =
+            update.old_partition_info.as_ref().context("Source partition info is missing")?;
+        let expected_size = info.size.context("Source partition size is missing")?;
+        let len = usize::try_from(expected_size).context("Source partition is too large")?;
+        ensure!(
+            backing_len >= len,
+            "Source partition size mismatch for {:?}: expected at least {expected_size}, got {backing_len}",
+            update.partition_name,
+        );
+        let mmap = if backing_len == 0 {
             None
         } else {
             Some(
@@ -475,15 +485,6 @@ impl<'a> ExtractOptions<'a> {
         };
         let source = SourcePartition { path, len, mmap };
 
-        let info =
-            update.old_partition_info.as_ref().context("Source partition info is missing")?;
-        let expected_size = info.size.context("Source partition size is missing")?;
-        ensure!(
-            usize::try_from(expected_size).ok() == Some(source.len),
-            "Source partition size mismatch for {:?}: expected {expected_size}, got {}",
-            update.partition_name,
-            source.len
-        );
         let expected_hash = info.hash.as_deref().context("Source partition hash is missing")?;
         verify_hash(
             source.bytes(),
@@ -577,7 +578,7 @@ struct SourcePartition {
 
 impl SourcePartition {
     fn bytes(&self) -> &[u8] {
-        self.mmap.as_deref().unwrap_or_default()
+        &self.mmap.as_deref().unwrap_or_default()[..self.len]
     }
 }
 
