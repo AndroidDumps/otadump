@@ -128,7 +128,7 @@ jobs:
         if: runner.os != 'Windows'
         run: >
           tar -cv
-          LICENSE README.md
+          LICENSE README.md src/puffin/LICENSE
           -C target/${{ matrix.target }}/release/ otadump
           | gzip --best
           > 'otadump-${{ steps.get_version.outputs.value }}-${{ matrix.target }}.tar.gz'
@@ -136,7 +136,7 @@ jobs:
         if: runner.os == 'Windows'
         run: >
           7z a 'otadump-${{ steps.get_version.outputs.value }}-${{ matrix.target }}.zip'
-          LICENSE README.md
+          LICENSE README.md src/puffin/LICENSE
           ./target/${{ matrix.target }}/release/otadump.exe
       - name: Upload artifact
         uses: actions/upload-artifact@v4.6.0

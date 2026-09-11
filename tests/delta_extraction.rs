@@ -105,6 +105,148 @@ const BROTLI_INVALID_HEADER_PATCH: &[u8] = &[
     0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
 ];
 
+const PUFFIN_FIXTURES: &str = "tests/fixtures/puffin";
+
+fn run_puffdiff_extraction(source: &[u8], target: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+
+    let source_split = source.len() / 2;
+    let mut source_partition = Vec::with_capacity(source.len() + 1);
+    source_partition.extend_from_slice(&source[..source_split]);
+    source_partition.push(0xa5);
+    source_partition.extend_from_slice(&source[source_split..]);
+    fs::write(source_dir.join("system.img"), &source_partition).unwrap();
+
+    let target_split = target.len() / 2;
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(1),
+        minor_version: Some(5),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(&source_partition)),
+            new_partition_info: Some(partition_info(target)),
+            operations: vec![InstallOperation {
+                operation_type: 9,
+                data_offset: Some(0),
+                data_length: Some(patch.len() as u64),
+                src_extents: vec![
+                    extent(0, source_split as u64),
+                    extent((source_split + 1) as u64, (source.len() - source_split) as u64),
+                ],
+                src_length: Some(source.len() as u64),
+                dst_extents: vec![
+                    extent(0, target_split as u64),
+                    extent(target_split as u64, (target.len() - target_split) as u64),
+                ],
+                dst_length: Some(target.len() as u64),
+                data_sha256_hash: Some(sha256(patch)),
+                src_sha256_hash: Some(sha256(source)),
+            }],
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, patch);
+
+    match ExtractOptions::new()
+        .source_dir(&source_dir)
+        .num_threads(2)
+        .extract(&payload, &output_dir)
+    {
+        Ok(()) => {
+            assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source_partition);
+            assert_eq!(fs::read_dir(&output_dir).unwrap().count(), 1);
+            Ok(fs::read(output_dir.join("system.img")).unwrap())
+        }
+        Err(error) => {
+            assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source_partition);
+            assert!(!output_dir.join("system.img").exists());
+            assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+            Err(error.to_string())
+        }
+    }
+}
+
+fn puffin_fixture(name: &str) -> Vec<u8> {
+    fs::read(Path::new(PUFFIN_FIXTURES).join(name)).unwrap()
+}
+
+fn with_puffin_patch_type(patch: &[u8], patch_type: u8) -> Vec<u8> {
+    let header_len = u32::from_be_bytes(patch[4..8].try_into().unwrap()) as usize;
+    let mut changed = Vec::with_capacity(patch.len() + 2);
+    changed.extend_from_slice(&patch[..8 + header_len]);
+    changed.extend_from_slice(&[0x20, patch_type]);
+    changed.extend_from_slice(&patch[8 + header_len..]);
+    changed[4..8].copy_from_slice(&((header_len + 2) as u32).to_be_bytes());
+    changed
+}
+
+#[test]
+fn puffdiff_bsdiff_reconstructs_pinned_puffin_goldens() {
+    let source = puffin_fixture("deflates-sample1.bin");
+    for (patch_name, target_name) in [
+        ("patch-1-to-2.puf", "deflates-sample2.bin"),
+        ("patch-1-to-raw.puf", "raw-11-22-33-44.bin"),
+    ] {
+        let patch = puffin_fixture(patch_name);
+        let target = puffin_fixture(target_name);
+        let output = run_puffdiff_extraction(&source, &target, &patch).unwrap();
+        assert_eq!(output, target);
+    }
+}
+
+#[test]
+fn malformed_puffdiff_data_fails_without_publication_or_process_failure() {
+    let source = puffin_fixture("deflates-sample1.bin");
+    let target = puffin_fixture("deflates-sample2.bin");
+    let valid_patch = puffin_fixture("patch-1-to-2.puf");
+
+    let mut bad_magic = valid_patch.clone();
+    bad_magic[..4].copy_from_slice(b"BAD!");
+
+    let truncated_proto = [b"PUF1".as_slice(), &1u32.to_be_bytes(), &[0x80]].concat();
+
+    let mut non_byte_puff = valid_patch.clone();
+    let puff_length = non_byte_puff
+        .windows(6)
+        .position(|window| window == [0x12, 0x04, 0x08, 0x10, 0x10, 0x58])
+        .unwrap()
+        + 5;
+    non_byte_puff[puff_length] += 1;
+
+    let mut overlapping_deflates = valid_patch.clone();
+    let second_deflate_offset = overlapping_deflates
+        .windows(6)
+        .position(|window| window == [0x0a, 0x04, 0x08, 0x50, 0x10, 0x0a])
+        .unwrap()
+        + 3;
+    overlapping_deflates[second_deflate_offset] = 0x40;
+
+    let mut bad_inner_bsdiff = valid_patch.clone();
+    let header_len = u32::from_be_bytes(bad_inner_bsdiff[4..8].try_into().unwrap()) as usize;
+    bad_inner_bsdiff[8 + header_len] = b'X';
+
+    for (patch, expected_error) in [
+        (bad_magic, "missing PUF1 magic"),
+        (truncated_proto, "truncated protobuf varint"),
+        (non_byte_puff, "puff extent is not byte-aligned"),
+        (overlapping_deflates, "deflate extents overlap or are unsorted"),
+        (bad_inner_bsdiff, "inner BSDIFF patch is invalid"),
+        (with_puffin_patch_type(&valid_patch, 1), "unsupported PUFFDIFF patch type 1"),
+        (with_puffin_patch_type(&valid_patch, 2), "unsupported PUFFDIFF patch type 2"),
+    ] {
+        let error = run_puffdiff_extraction(&source, &target, &patch).unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+    }
+
+    let short_target = &target[..target.len() - 1];
+    let error = run_puffdiff_extraction(&source, short_target, &valid_patch).unwrap_err();
+    assert!(error.contains("destination raw size mismatch"), "unexpected error: {error}");
+}
+
 #[cfg(otadump_zucchini)]
 const ZUCCHINI_FIXTURES: &str = "tests/fixtures/zucchini";
 

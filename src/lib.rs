@@ -4,6 +4,7 @@ mod chromeos_update_engine {
     include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
 }
 mod payload;
+mod puffin;
 #[cfg(feature = "python")]
 mod python;
 mod verity;
@@ -903,6 +904,10 @@ impl Task<'_> {
                 let patch = self.extract_data(op).context("Error extracting ZUCCHINI data")?;
                 self.run_op_zucchini(op, patch, &mut dst_extents)
             }
+            Type::Puffdiff => {
+                let patch = self.extract_data(op).context("Error extracting PUFFDIFF data")?;
+                self.run_op_puffdiff(op, patch, &mut dst_extents)
+            }
             Type::Zero | Type::Discard => {
                 for extent in dst_extents {
                     for chunk in extent.chunks_mut(VERIFY_CHUNK_SIZE) {
@@ -949,6 +954,9 @@ impl Task<'_> {
         validate_bsdiff_output_len(patch, expected_output_len)
             .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
         self.cancellation_token.check()?;
+        puffin::validate_bsdiff_resources(patch, expected_output_len, self.cancellation_token)
+            .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
+        self.cancellation_token.check()?;
         let mut output = Vec::new();
         output
             .try_reserve_exact(expected_output_len)
@@ -982,6 +990,34 @@ impl Task<'_> {
         self.cancellation_token.check()?;
         let output = zucchini::apply(&source, &patch, expected_output_len)
             .map_err(|error| anyhow::anyhow!("ZUCCHINI apply failed: {error}"))?;
+        self.cancellation_token.check()?;
+        self.write_exact(&output, dst_extents)
+    }
+
+    fn run_op_puffdiff(
+        &self,
+        op: &InstallOperation,
+        patch: &[u8],
+        dst_extents: &mut [&mut [u8]],
+    ) -> Result<()> {
+        let source_partition = self.source.as_ref().context("Source partition was not opened")?;
+        let source_ranges = extent_ranges(&op.src_extents, self.block_size, source_partition.len)?;
+        let source_size = ranges_len(&source_ranges)?;
+        let destination_size = dst_extents.iter().try_fold(0usize, |size, extent| {
+            size.checked_add(extent.len()).context("Combined PUFFDIFF destination length overflow")
+        })?;
+        ensure!(
+            source_size < zucchini::OFFSET_BOUND && destination_size < zucchini::OFFSET_BOUND,
+            "PUFFDIFF raw stream exceeds the maximum size of {} bytes",
+            zucchini::OFFSET_BOUND - 1
+        );
+        let source = self.extract_source_data(op)?;
+        self.cancellation_token.check()?;
+        let output = puffin::apply(&source, patch, destination_size, self.cancellation_token)
+            .map_err(|error| {
+                let message = error.to_string();
+                anyhow::Error::new(error).context(format!("PUFFDIFF apply failed: {message}"))
+            })?;
         self.cancellation_token.check()?;
         self.write_exact(&output, dst_extents)
     }
@@ -1170,7 +1206,8 @@ fn validate_bsdiff_output_len(patch: &[u8], expected: usize) -> Result<()> {
         &patch[..8] == b"BSDIFF40" || &patch[..5] == b"BSDF2",
         "Invalid BSDIFF/BSDF2 magic header"
     );
-    let encoded = u64::from_le_bytes(patch[24..32].try_into().unwrap());
+    let encoded =
+        u64::from_le_bytes(patch[24..32].try_into().context("Invalid BSDIFF output length field")?);
     ensure!(encoded & (1 << 63) == 0, "Negative output length in patch header");
     let actual = usize::try_from(encoded).context("Patch output length is too large")?;
     ensure!(actual == expected, "Patch output length mismatch: expected {expected}, got {actual}");
