@@ -142,7 +142,6 @@ pub struct DexDisassembler {
     class_def_map: MapItem,
     call_site_map: MapItem,
     method_handle_map: MapItem,
-    code_map: MapItem,
     code_item_offsets: Vec<u32>,
     type_list_offsets: Vec<u32>,
     annotation_set_ref_list_offsets: Vec<u32>,
@@ -244,7 +243,6 @@ impl DexDisassembler {
             class_def_map: get(T_CLASS_DEF),
             call_site_map: get(T_CALL_SITE_ID),
             method_handle_map: get(T_METHOD_HANDLE),
-            code_map,
             code_item_offsets,
             type_list_offsets,
             annotation_set_ref_list_offsets,
@@ -327,7 +325,7 @@ fn parse_annotations_directory_items(
     let mut parameter_offsets = Vec::new();
     let mut pos = map_item.offset as usize;
 
-    let mut parse_list = |pos: &mut usize, count: u32, width: usize, out: &mut Vec<u32>| -> Option<()> {
+    let parse_list = |pos: &mut usize, count: u32, width: usize, out: &mut Vec<u32>| -> Option<()> {
         if (image.len() - *pos) / width < count as usize {
             return None;
         }

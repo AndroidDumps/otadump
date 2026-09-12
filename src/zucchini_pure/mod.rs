@@ -8,6 +8,19 @@
 //!
 //! Scope and status are documented in `docs/zucchini-rust-port.md`.
 
+// This is a line-by-line port of the C++ apply path, so several clippy style
+// lints (control-flow shape, argument counts, explicit byte indexing) are
+// intentionally allowed rather than restructured away from the original.
+#![allow(
+    clippy::collapsible_if,
+    clippy::implicit_saturating_sub,
+    clippy::manual_is_multiple_of,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_cast
+)]
+
 use std::error;
 use std::fmt;
 

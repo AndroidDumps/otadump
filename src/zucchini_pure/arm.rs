@@ -30,7 +30,7 @@ fn signed_bits_u16(value: u16, lo: u32, hi: u32) -> i32 {
     // `GetSignedBits` on a 16-bit value.
     let num_bits = 16i32;
     let shift = num_bits - 1 - hi as i32;
-    ((i32::from(value) << shift) << 0) >> (shift + lo as i32)
+    (i32::from(value) << shift) >> (shift + lo as i32)
 }
 
 #[inline]
