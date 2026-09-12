@@ -13,6 +13,10 @@ pub fn read_i16(data: &[u8], offset: usize) -> Option<i16> {
     Some(read_u16(data, offset)? as i16)
 }
 
+pub fn read_i8(data: &[u8], offset: usize) -> Option<i8> {
+    Some(read_u8(data, offset)? as i8)
+}
+
 pub fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     let bytes = data.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
