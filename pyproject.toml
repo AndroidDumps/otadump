@@ -12,7 +12,7 @@ license = "MIT"
 license-files = [
     "LICENSE",
     "src/puffin/LICENSE",
-    "native/lz4/LICENSE",
+    "licenses/LICENSE.lz4",
 ]
 authors = [
     { name = "Kartik Sharma", email = "kartik.sharma522@gmail.com" },

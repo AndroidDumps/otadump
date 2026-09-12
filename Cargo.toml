@@ -21,7 +21,6 @@ crate-type = ["cdylib", "rlib"]
 python = ["dep:pyo3"]
 
 [build-dependencies]
-cc = "=1.2.27"
 prost-build = "0.14.1"
 protoc-bin-vendored = "3.2.0"
 
@@ -35,6 +34,11 @@ ctrlc = "3.5.0"
 hex = "0.4.3"
 indicatif = "0.17.3"
 liblzma = { version = "0.4.2", features = ["static"] }
+# Pinned exactly. The only published 1.11.1 is `1.11.1+lz4-1.10.0` (Cargo
+# ignores `+metadata` in requirements, so the lockfile checksum enforces it):
+# it bundles liblz4 1.10.0, byte-identical to the AOSP platform/external/lz4
+# sources that Android lz4diff uses.
+lz4-sys = "=1.11.1"
 memmap2 = "0.9.5"
 nom = "7.1.1"
 nom-derive = "0.10.1"

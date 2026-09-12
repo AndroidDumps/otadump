@@ -1,4 +1,16 @@
+//! LZ4 block operations for Android `lz4diff`, backed by the pinned `lz4-sys`
+//! crate. The crate bundles liblz4 1.10.0 C sources that are byte-identical
+//! (SHA-256 verified) to AOSP `platform/external/lz4` commit
+//! `734e07032602e9a72fcc9701028b0aee45147fcd`, so compressed output matches
+//! the AOSP reference byte for byte. See `licenses/README.md`.
+
+// Force the pinned `lz4-sys` crate into the crate graph: its rlib carries the
+// `cargo:rustc-link-lib=static=lz4` metadata that links the bundled liblz4
+// archive, which the direct extern declarations below resolve against.
+use lz4_sys as _;
+
 use std::error;
+use std::ffi::{c_char, c_int, c_void};
 use std::fmt;
 
 const MAX_INPUT_SIZE: usize = 0x7e00_0000;
@@ -12,8 +24,6 @@ pub enum Status {
     DecompressionFailed,
     AllocationFailure,
     CompressionDivergence,
-    UnsupportedTarget,
-    Unknown(i32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,7 +50,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Decompresses one LZ4 block into a newly allocated, exact-size buffer.
 pub fn decompress_safe_partial(input: &[u8], output_size: usize) -> Result<Vec<u8>> {
-    ensure_supported()?;
     validate_sizes(input.len(), output_size)?;
     if input.len() >= output_size {
         return Err(invalid_argument("stored LZ4 block must be smaller than its raw block"));
@@ -112,7 +121,6 @@ fn compress(
     zero_padding: bool,
     compression_level: Option<i32>,
 ) -> Result<Vec<u8>> {
-    ensure_supported()?;
     validate_sizes(input.len(), output_size)?;
     if let Some(expected) = expected_source_size {
         if expected == 0 || expected > input.len() {
@@ -197,157 +205,105 @@ struct NativeResult {
     output_size: usize,
 }
 
-#[cfg(otadump_lz4)]
 fn decompress_native(input: &[u8], output: &mut [u8]) -> Result<NativeResult> {
-    native_call(input, output, None, true)
-}
-
-#[cfg(not(otadump_lz4))]
-fn decompress_native(_input: &[u8], _output: &mut [u8]) -> Result<NativeResult> {
-    Err(unsupported_target())
-}
-
-#[cfg(otadump_lz4)]
-fn compress_native(
-    input: &[u8],
-    output: &mut [u8],
-    compression_level: Option<i32>,
-) -> Result<NativeResult> {
-    native_call(input, output, compression_level, false)
-}
-
-#[cfg(not(otadump_lz4))]
-fn compress_native(
-    _input: &[u8],
-    _output: &mut [u8],
-    _compression_level: Option<i32>,
-) -> Result<NativeResult> {
-    Err(unsupported_target())
-}
-
-#[cfg(not(otadump_lz4))]
-fn ensure_supported() -> Result<()> {
-    Err(unsupported_target())
-}
-
-#[cfg(otadump_lz4)]
-fn ensure_supported() -> Result<()> {
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn unsupported_target() -> Error {
-    Error {
-        status: Status::UnsupportedTarget,
-        message: "LZ4 block operations are supported only on Linux x86_64 GNU hosts".into(),
-    }
-}
-
-#[cfg(otadump_lz4)]
-fn native_call(
-    input: &[u8],
-    output: &mut [u8],
-    compression_level: Option<i32>,
-    decompress: bool,
-) -> Result<NativeResult> {
-    use std::ffi::c_int;
-
-    #[repr(C)]
-    struct FfiResult {
-        status: c_int,
-        source_size: c_int,
-        output_size: c_int,
-    }
-
-    unsafe extern "C" {
-        fn otadump_lz4_decompress_safe_partial(
-            source: *const u8,
-            source_size: c_int,
-            output: *mut u8,
-            output_capacity: c_int,
-            target_output_size: c_int,
-        ) -> FfiResult;
-        fn otadump_lz4_compress_dest_size(
-            source: *const u8,
-            source_size: c_int,
-            output: *mut u8,
-            output_capacity: c_int,
-        ) -> FfiResult;
-        fn otadump_lz4_compress_hc_dest_size(
-            source: *const u8,
-            source_size: c_int,
-            output: *mut u8,
-            output_capacity: c_int,
-            compression_level: c_int,
-        ) -> FfiResult;
-    }
-
-    let source_size =
-        i32::try_from(input.len()).map_err(|_| invalid_argument("LZ4 input size exceeds int"))?;
-    let output_size =
-        i32::try_from(output.len()).map_err(|_| invalid_argument("LZ4 output size exceeds int"))?;
     // SAFETY: The immutable input and mutable output slices cannot alias. They
     // remain alive for the call, and their checked lengths match the pointers.
-    let result = unsafe {
-        if decompress {
-            otadump_lz4_decompress_safe_partial(
-                input.as_ptr(),
-                source_size,
-                output.as_mut_ptr(),
-                output_size,
-                output_size,
-            )
-        } else if let Some(level) = compression_level {
-            otadump_lz4_compress_hc_dest_size(
-                input.as_ptr(),
-                source_size,
-                output.as_mut_ptr(),
-                output_size,
+    let written = unsafe {
+        LZ4_decompress_safe_partial(
+            input.as_ptr().cast::<c_char>(),
+            output.as_mut_ptr().cast::<c_char>(),
+            to_c_int(input.len())?,
+            to_c_int(output.len())?,
+            to_c_int(output.len())?,
+        )
+    };
+    if written < 0 {
+        return Err(Error {
+            status: Status::DecompressionFailed,
+            message: "LZ4 decompression failed".into(),
+        });
+    }
+    Ok(NativeResult { source_size: input.len(), output_size: written as usize })
+}
+
+fn compress_native(
+    input: &[u8],
+    output: &mut [u8],
+    compression_level: Option<i32>,
+) -> Result<NativeResult> {
+    let mut consumed = to_c_int(input.len())?;
+    let capacity = to_c_int(output.len())?;
+    // SAFETY: The immutable input and mutable output slices cannot alias. They
+    // remain alive for the call, and their checked lengths match the pointers.
+    // `consumed` is a valid in-out parameter initialized to the input length.
+    let written = unsafe {
+        if let Some(level) = compression_level {
+            let stream = LZ4_createStreamHC();
+            if stream.is_null() {
+                return Err(Error {
+                    status: Status::AllocationFailure,
+                    message: "unable to allocate the LZ4HC stream state".into(),
+                });
+            }
+            let written = LZ4_compress_HC_destSize(
+                stream,
+                input.as_ptr().cast::<c_char>(),
+                output.as_mut_ptr().cast::<c_char>(),
+                &mut consumed,
+                capacity,
                 level,
-            )
+            );
+            LZ4_freeStreamHC(stream);
+            written
         } else {
-            otadump_lz4_compress_dest_size(
-                input.as_ptr(),
-                source_size,
-                output.as_mut_ptr(),
-                output_size,
+            LZ4_compress_destSize(
+                input.as_ptr().cast::<c_char>(),
+                output.as_mut_ptr().cast::<c_char>(),
+                &mut consumed,
+                capacity,
             )
         }
     };
-    if result.status != 0 {
+    if written <= 0 {
         return Err(Error {
-            status: native_status(result.status),
-            message: native_message(result.status).into(),
+            status: Status::CompressionFailed,
+            message: "LZ4 compression failed".into(),
         });
     }
-    Ok(NativeResult {
-        source_size: usize::try_from(result.source_size)
-            .map_err(|_| invalid_argument("native LZ4 returned a negative source size"))?,
-        output_size: usize::try_from(result.output_size)
-            .map_err(|_| invalid_argument("native LZ4 returned a negative output size"))?,
-    })
+    Ok(NativeResult { source_size: consumed as usize, output_size: written as usize })
 }
 
-#[cfg(otadump_lz4)]
-fn native_status(status: i32) -> Status {
-    match status {
-        1 => Status::InvalidArgument,
-        2 => Status::CompressionFailed,
-        3 => Status::DecompressionFailed,
-        4 => Status::AllocationFailure,
-        status => Status::Unknown(status),
-    }
+fn to_c_int(size: usize) -> Result<c_int> {
+    c_int::try_from(size).map_err(|_| invalid_argument("LZ4 size exceeds int"))
 }
 
-#[cfg(otadump_lz4)]
-fn native_message(status: i32) -> &'static str {
-    match status {
-        1 => "native LZ4 rejected an argument",
-        2 => "native LZ4 compression failed",
-        3 => "native LZ4 decompression failed",
-        4 => "native LZ4 allocation failed",
-        _ => "native LZ4 failed with an unknown status",
-    }
+// Direct declarations for the liblz4 block API: the pinned `lz4-sys` crate
+// statically links the bundled liblz4 archive but its bindings omit these
+// symbols. Signatures match `lz4.h`/`lz4hc.h` 1.10.0.
+unsafe extern "C" {
+    fn LZ4_decompress_safe_partial(
+        source: *const c_char,
+        dest: *mut c_char,
+        compressed_size: c_int,
+        target_output_size: c_int,
+        max_decompressed_size: c_int,
+    ) -> c_int;
+    fn LZ4_compress_destSize(
+        source: *const c_char,
+        dest: *mut c_char,
+        source_size: *mut c_int,
+        target_dest_size: c_int,
+    ) -> c_int;
+    fn LZ4_createStreamHC() -> *mut c_void;
+    fn LZ4_freeStreamHC(stream: *mut c_void) -> c_int;
+    fn LZ4_compress_HC_destSize(
+        stream: *mut c_void,
+        source: *const c_char,
+        dest: *mut c_char,
+        source_size: *mut c_int,
+        target_dest_size: c_int,
+        compression_level: c_int,
+    ) -> c_int;
 }
 
 #[cfg(test)]
