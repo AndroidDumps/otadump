@@ -112,6 +112,14 @@ Set `source_dir` to a directory containing matching base partition images for su
 Extraction generates declared dm-verity hash-tree and FEC extents before verifying each partition.
 Extraction releases the Python GIL.
 
+### Local release packages
+
+Build the Linux x86-64 GNU CLI with `cargo build --release --locked`.
+Build the ABI3 Python wheel with `uv build --wheel`.
+The wheel supports Python 3.9 and later and uses the build host's glibc baseline.
+Build release packages on the oldest Linux environment that you support.
+Release archives and wheels include the notices for vendored Puffin, LZ4, Zucchini, libchrome, ICU, and NSPR code.
+
 ## Contributors
 
 - [Kartik Sharma][crazystylus]

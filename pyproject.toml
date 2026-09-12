@@ -9,6 +9,16 @@ description = "Extract partitions from Android OTA files"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
+license-files = [
+    "LICENSE",
+    "src/puffin/LICENSE",
+    "native/lz4/LICENSE",
+    "native/zucchini/vendor/zucchini/LICENSE",
+    "native/zucchini/vendor/libchrome/NOTICE",
+    "native/zucchini/vendor/libchrome/base/third_party/icu/LICENSE",
+    "native/zucchini/vendor/libchrome/base/third_party/nspr/LICENSE",
+    "native/zucchini/vendor/libchrome/base/third_party/nspr/MPL-1.1.txt",
+]
 authors = [
     { name = "Kartik Sharma", email = "kartik.sharma522@gmail.com" },
     { name = "Ajeet D'Souza", email = "98ajeet@gmail.com" },
@@ -20,3 +30,4 @@ classifiers = [
 
 [tool.maturin]
 features = ["python"]
+locked = true
