@@ -25,4 +25,4 @@ Repository = "https://github.com/AndroidDumps/otadump"
 packages = ["otadump"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/otadump", "/scripts", "/tests", "/AGENTS.md", "/LICENSE", "/README.md", "/pyproject.toml"]
+include = ["/otadump", "/tests", "/AGENTS.md", "/LICENSE", "/README.md", "/pyproject.toml"]

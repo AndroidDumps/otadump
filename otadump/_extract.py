@@ -3,8 +3,9 @@ from __future__ import annotations
 import struct
 import subprocess
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Union
+from typing import Union
 
 from . import _artifact
 
@@ -12,7 +13,7 @@ PathLike = Union[str, "Path"]
 
 
 class OtaDumpError(RuntimeError):
-    """Raised when the AOSP extractor cannot reconstruct the requested images."""
+    """Raised when ota_extractor cannot reconstruct the requested images."""
 
 
 def _zip_payload_offset(path: Path) -> int:
@@ -39,7 +40,6 @@ def extract(
     *,
     source_dir: PathLike | None = None,
     partitions: Iterable[str] | None = None,
-    single_thread: bool = False,
 ) -> None:
     """Extract images from a full or incremental Android OTA payload."""
     payload = Path(payload_file).expanduser().resolve()
@@ -65,14 +65,12 @@ def extract(
         if not selected or any(not name or "," in name for name in selected):
             raise ValueError("partitions must contain non-empty names without commas")
         command.append(f"--partitions={','.join(selected)}")
-    if single_thread:
-        command.append("--single_thread")
     try:
         result = subprocess.run(command, text=True, capture_output=True, check=False)
     except OSError as error:
-        raise OtaDumpError(f"could not start AOSP ota_extractor: {error}") from error
+        raise OtaDumpError(f"could not start LineageOS ota_extractor: {error}") from error
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
         raise OtaDumpError(
-            f"AOSP ota_extractor failed with status {result.returncode}: {detail}"
+            f"LineageOS ota_extractor failed with status {result.returncode}: {detail}"
         )

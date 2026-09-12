@@ -1,3 +1,5 @@
+# ruff: noqa: I001
+
 import subprocess
 import sys
 from pathlib import Path
@@ -11,4 +13,4 @@ result = subprocess.run([executable(), "--help"], text=True, capture_output=True
 assert result.returncode == 1  # gflags uses status 1 after printing help.
 assert "system/update_engine/aosp/ota_extractor.cc" in result.stdout
 assert "input_dir" in result.stdout
-assert "single_thread" in result.stdout
+assert "single_thread" not in result.stdout

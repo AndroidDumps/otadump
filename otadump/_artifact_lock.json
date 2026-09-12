@@ -1,30 +1,8 @@
 {
-  "aosp_build": "android17-release/14524720",
-  "aosp_source_tag": "android-17.0.0_r1",
-  "aosp_update_engine_commit": "4591637f51644f5429f9e2fe589ab22b92f61842",
-  "upstream_url": "https://ci.android.com/builds/submitted/14524720/android17-release/latest/otatools.zip",
-  "upstream_sha256": "4f8da78667e4bbc49fb993d4d6dca52d09e7cf6ed9fc9a62ebad2647d2dc454c",
-  "bundle_url": "https://github.com/AndroidDumps/otadump/releases/download/aosp-ota-extractor-android-17.0.0_r1/aosp-ota-extractor-14524720.zip",
-  "bundle_sha256": "96c5df0c64be9ce51bb4c8992f06ba279187d83dc805e99e15e916bd733e2c5a",
-  "files": {
-    "bin/ota_extractor": "8ce3fcdbe39f8d2e3f7a56a264725b28c91137f723c176d68adf1172e8916b1e",
-    "lib64/libbase.so": "873c30ca9cc59f925a8a414d3937c9cea174ec46dbe6a950c72ecca4f267d737",
-    "lib64/libbrillo-stream.so": "66df60dd0ca5967f642f0fe9fbc396702d93223dd2ffa49103b43da2eaccb287",
-    "lib64/libbrillo.so": "1869814ab6efbf8e103b2bf91390f89525fbe8a04d26793ca03fadb9e21e8d0f",
-    "lib64/libc++.so": "aab89aa18f9bec8e01c632b4230f4544fb6128b5d3df7ce6971c52b8c77bb11c",
-    "lib64/libchrome.so": "7cf69ccfe4337b7f1e9ed2a3e4b427d2a42def726c36ac0b7a186538b9ccb813",
-    "lib64/libcrypto-host.so": "aa40f48fda2ddf87945681fe0e0b3490a9e5b720e2fa89f81b5096debae08fbc",
-    "lib64/libcrypto_utils.so": "7f04059441825997dcc54ac971755a8e82863f549c667ddf0177055ad0cfcee5",
-    "lib64/libcutils.so": "18059b6c87bdb8f8b93c775f31fd64eee251157b9a38edca88d60188af5515db",
-    "lib64/libevent-host.so": "b3d393bd147eac29f1fa3c8c640dad4c2514d075227b0c251c4fa86621ec89d0",
-    "lib64/libext4_utils.so": "e72e5d6590252091a11cbb4cb9cf5b9f66a4d2a158873272a794c307714fe118",
-    "lib64/libfec.so": "f55b6ac2bf6f40e2435f94e51e39cbb792bd36f1441fd525f26162fecae0eaba",
-    "lib64/liblog.so": "5bdd1193cc34fbe37fdd6f640b7cb16359ae92c1b4993f9e55cd390d5d15bebb",
-    "lib64/liblz4.so": "91f254e2549cfc0305730078d6bf34cb695bfbffabe910c2e2c10216234e60e5",
-    "lib64/libprotobuf-cpp-lite.so": "85519577353639fd79a63e822ea419bcfaffffcbf670f2fb313f2c4d8acf1ba1",
-    "lib64/libsquashfs_utils.so": "0dff5db06e04aeb2ef47e2c83b50aa78aee8530f0614cbf6e042bb989f168702",
-    "lib64/libssl-host.so": "9a8ef2fec6d330c081aff6951bcf2483fa8e29d308f50faa857a314a12443f54",
-    "lib64/libz-host.so": "db58a2e3aef638cf68b7ed3dde5ad70ceb1566ddbd84c6157d871ed695983ec3",
-    "lib64/libziparchive.so": "a2b7e6490a5e7d0eb478975c2e5fefa5d77ba2a67585e9ded26c48feec245b7b"
-  }
+  "repository": "LineageOS/android_prebuilts_extract-tools",
+  "commit": "f29fef8c620c67e680877126ca19fe0bc1b7038d",
+  "source_tag": "android-14.0.0_r17",
+  "url": "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/f29fef8c620c67e680877126ca19fe0bc1b7038d/linux-x86/bin/ota_extractor",
+  "sha256": "b417304695c671c003cec9747ff671ab0579979b2c374a0229346df4cadfd3d5",
+  "size": 36167008
 }

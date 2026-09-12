@@ -30,14 +30,12 @@ class ExtractTest(unittest.TestCase):
             self.root / "output",
             source_dir=source,
             partitions=["boot", "system"],
-            single_thread=True,
         )
 
         command = run.call_args.args[0]
         self.assertIn(f"--payload={self.payload}", command)
         self.assertIn(f"--input_dir={source}", command)
         self.assertIn("--partitions=boot,system", command)
-        self.assertIn("--single_thread", command)
 
     @mock.patch("otadump._extract._artifact.executable", return_value=Path("/tool"))
     @mock.patch("otadump._extract.subprocess.run")

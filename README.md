@@ -1,13 +1,13 @@
 # otadump
 
-`otadump` is a small Python interface to AOSP's `ota_extractor`. It supports
-full and incremental Android OTA payloads without maintaining a separate delta
-implementation.
+`otadump` is a small Python interface to LineageOS's static `ota_extractor`.
+It supports full and incremental Android OTA payloads without maintaining a
+separate delta implementation.
 
-The package supports Linux x86_64. On first use it downloads a pinned runtime
-bundle containing unmodified files from the official Android 17
-`android17-release` otatools build 14524720. The bundle and every extracted
-file are verified against `otadump/_artifact_lock.json` before execution.
+The package supports Linux x86_64 only. On first use it downloads the pinned
+static executable and verifies its exact size and SHA-256 against
+`otadump/_artifact_lock.json` before execution. The URL and hash are isolated in
+that lock file so the backend artifact can be replaced independently later.
 
 ## Installation
 
@@ -32,7 +32,11 @@ otadump.extract(
 
 `payload_file` may be a raw `payload.bin` or an OTA ZIP whose `payload.bin` is
 stored without compression, as required by Android OTA packages. Set
-`single_thread=True` to request AOSP's serial extraction mode.
+`source_dir` to the old partition images when extracting an incremental OTA.
+
+The pinned extractor does not support payload operations of type `DISCARD`.
+Such payloads fail extraction with `OtaDumpError`; otadump does not pre-scan the
+protobuf manifest because that would duplicate a payload parser in Python.
 
 Extraction failures raise `otadump.OtaDumpError` with the native tool's error
 output. Runtime files are cached under `$XDG_CACHE_HOME/otadump` (or
@@ -40,13 +44,15 @@ output. Runtime files are cached under `$XDG_CACHE_HOME/otadump` (or
 
 ## Provenance
 
-The runtime is derived from AOSP's official artifact:
+The executable comes directly from LineageOS's prebuilt extract-tools
+repository:
 
-- Build: `android17-release` build `14524720`
-- Source tag: `android-17.0.0_r1`
-- `system/update_engine`: `4591637f51644f5429f9e2fe589ab22b92f61842`
-- Upstream SHA-256: `4f8da78667e4bbc49fb993d4d6dca52d09e7cf6ed9fc9a62ebad2647d2dc454c`
+- Repository: `LineageOS/android_prebuilts_extract-tools`
+- Signed commit: `f29fef8c620c67e680877126ca19fe0bc1b7038d`
+- Commit provenance: statically compiled from AOSP tag `android-14.0.0_r17`
+- Path: `linux-x86/bin/ota_extractor`
+- SHA-256: `b417304695c671c003cec9747ff671ab0579979b2c374a0229346df4cadfd3d5`
+- Size: 36,167,008 bytes
 
-The reproducible subset builder is `scripts/build-artifact.py`. It only copies
-the extractor and its runtime shared-library closure; it does not compile or
-modify AOSP code.
+GitHub verifies the commit's PGP signature. The downloaded ELF is statically
+linked, so no LineageOS or AOSP shared-library bundle is installed.
