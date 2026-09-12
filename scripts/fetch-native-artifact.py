@@ -252,9 +252,6 @@ def main() -> int:
 
         return publish_tree(extracted, out_dir, checksums)
 
-    return 0
-
-
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
