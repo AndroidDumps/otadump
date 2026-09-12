@@ -4,11 +4,9 @@
 use super::arm;
 use super::bytes::{
     align_ceil, increment_for_align_ceil2, increment_for_align_ceil4, range_covers,
-    range_is_bounded, read_i32, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
+    range_is_bounded, read_i32, read_u16, read_u32, read_u64, write_u32, write_u64,
 };
-use super::{
-    Disassembler, GroupTraits, K_INVALID_OFFSET, K_INVALID_RVA, OFFSET_BOUND, Reference, Result,
-};
+use super::{Disassembler, GroupTraits, K_INVALID_RVA, Reference, Result};
 
 const K_RVA_BOUND: u32 = 0x7FFF_FFFF;
 const K_SIZE_BOUND: u64 = 0x7FFF_0000;
@@ -1270,14 +1268,6 @@ fn write_aarch64(
     if ok {
         arm::store_arm_code32(image, location, code);
     }
-}
-
-#[allow(dead_code)]
-fn _keep_helpers() {
-    let _ = write_u16;
-    let _ = range_is_bounded;
-    let _ = K_INVALID_OFFSET;
-    let _ = OFFSET_BOUND;
 }
 
 #[cfg(test)]

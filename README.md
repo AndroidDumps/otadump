@@ -59,9 +59,9 @@ curl -sS https://raw.githubusercontent.com/crazystylus/otadump/mainline/install.
 Otherwise, using Cargo:
 
 ```sh
-# Needs LZMA, Protobuf and pkg-config libraries installed.
-# - On macOS: brew install protobuf xz pkg-config
-# - On Debian / Ubuntu: apt install liblzma-dev protobuf-compiler pkg-config
+# Needs LZMA and pkg-config libraries installed.
+# - On macOS: brew install xz pkg-config
+# - On Debian / Ubuntu: apt install liblzma-dev pkg-config
 cargo install --locked otadump
 ```
 
@@ -84,7 +84,6 @@ otadump payload.bin
 # Apply a SOURCE_COPY, SOURCE_BSDIFF, BROTLI_BSDIFF, PUFFDIFF (inner BSDIFF or
 # ZUCCHINI), standalone ZUCCHINI, or LZ4DIFF (inner BSDIFF or PUFFDIFF) delta
 # payload with matching base images.
-# ZUCCHINI requires Linux x86-64 GNU.
 otadump delta.zip --output-dir output --source-dir source-images
 ```
 

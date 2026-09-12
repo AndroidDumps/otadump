@@ -1,8 +1,7 @@
 # Pure-Rust Zucchini apply port
 
 Status: implemented and verified byte-exact against every committed Zucchini
-fixture. This is now the only apply path; the vendored C++/libchrome build is
-opt-in for differential testing.
+fixture. This is now the only apply path.
 Scope: **apply only**, Android delta OTA element formats (`NoOp`, ELF
 x86/x86-64/AArch32/AArch64, DEX).
 
@@ -25,7 +24,7 @@ all of that surface was unnecessary. The apply path is now safe Rust under
 | ELF parse, address translation, reloc/abs32, Intel + ARM rel32 finders | `disassembler_elf.cc`, `address_translator.cc`, `reloc_elf.cc`, `abs32_utils.cc`, `rel32_utils.cc`, `rel32_finder.cc` | `elf.rs` |
 | AArch32/AArch64 and THUMB2 instruction codecs | `arm_utils.cc` | `arm.rs` |
 | DEX header/map/code-item/item-list parsing and all 42 reference groups | `disassembler_dex.cc`, `type_dex.h` | `dex.rs` |
-| Android preflight hardening | `native/zucchini/src/zucchini_ffi.cc` | `engine.rs` |
+| Android preflight hardening | legacy native FFI preflight behavior | `engine.rs` |
 | Little-endian helpers and bit fields | `buffer_view.h`, `algorithm.h` | `bytes.rs` |
 
 `Disassembler` (in `mod.rs`) is the only abstraction the engine needs: size,

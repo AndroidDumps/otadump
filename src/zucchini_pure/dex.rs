@@ -421,11 +421,10 @@ fn parse_annotations_directory_items(
             return None;
         }
         directory_offsets.push(pos as u32);
-        let class_annotations_off = read_u32(image, pos)?;
+        let _class_annotations_off = read_u32(image, pos)?;
         let fields_size = read_u32(image, pos + 4)?;
         let methods_size = read_u32(image, pos + 8)?;
         let parameters_size = read_u32(image, pos + 12)?;
-        let _ = class_annotations_off;
         pos += 16;
         parse_list(&mut pos, fields_size, 8, &mut field_offsets)?;
         parse_list(&mut pos, methods_size, 8, &mut method_offsets)?;

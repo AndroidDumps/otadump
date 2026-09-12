@@ -70,16 +70,6 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install build deps (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
-
-      - name: Install build deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
       - name: Install zig
         if: runner.os == 'Linux' && !contains(matrix.target, 'android')
         uses: mlugg/setup-zig@v2
@@ -102,12 +92,6 @@ jobs:
         with:
           ndk-version: r23
           local-cache: true
-
-      - name: Install protoc (Windows)
-        if: runner.os == 'Windows'
-        uses: arduino/setup-protoc@v1
-        with:
-          version: "3.x"
 
       - name: Build binary (Linux)
         if: runner.os == 'Linux' && !contains(matrix.target, 'android')

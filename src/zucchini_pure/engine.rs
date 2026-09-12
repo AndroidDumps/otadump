@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 
-use super::bytes::{range_covers, range_is_bounded};
 use super::dex;
 use super::patch::{
     EXE_TYPE_DEX, EXE_TYPE_ELF_AARCH32, EXE_TYPE_ELF_AARCH64, EXE_TYPE_ELF_X64, EXE_TYPE_ELF_X86,
@@ -898,13 +897,6 @@ impl TargetPool {
     fn key_is_valid(&self, key: u32) -> bool {
         (key as usize) < self.targets.len()
     }
-}
-
-/// Keeps the range helpers referenced for later DEX validation code.
-#[allow(dead_code)]
-fn _range_helpers() {
-    let _ = range_covers;
-    let _ = range_is_bounded;
 }
 
 #[cfg(test)]
