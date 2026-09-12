@@ -80,6 +80,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 7. **Checked DEX map sizing.** Map-array sizes use checked multiplication, and
    attacker-sized parser vectors use `try_reserve` instead of infallible
    `with_capacity`.
+8. **DEX index read widths.** Index-based mappers derive their read width from
+   the group's declared reference width (differential testing against native
+   caught group 0; this also fixes the 32-bit annotations-directory ids in
+   groups 19/22/23, which were being read as 16-bit).
 
 ## Cancellation and allocation
 
