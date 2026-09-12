@@ -309,31 +309,57 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::sync::OnceLock;
+
+    use zip::ZipArchive;
+
+    static FIXTURES: OnceLock<HashMap<String, Vec<u8>>> = OnceLock::new();
+
+    fn fixture(path: &str) -> Vec<u8> {
+        FIXTURES
+            .get_or_init(|| {
+                let file = File::open("tests/fixtures/corpus/opaque-fixtures.zip").unwrap();
+                let mut archive = ZipArchive::new(file).unwrap();
+                let mut fixtures = HashMap::with_capacity(archive.len());
+                for index in 0..archive.len() {
+                    let mut member = archive.by_index(index).unwrap();
+                    let mut bytes = Vec::new();
+                    std::io::copy(&mut member, &mut bytes).unwrap();
+                    fixtures.insert(member.name().to_string(), bytes);
+                }
+                fixtures
+            })
+            .get(path)
+            .unwrap_or_else(|| panic!("missing fixture in corpus zip: {path}"))
+            .clone()
+    }
 
     #[test]
     fn matches_frozen_lz4_reference() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
-        let expected = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.lz4");
+        let raw = fixture("lz4/lz4-no-postfix.raw");
+        let expected = fixture("lz4/lz4-no-postfix.lz4");
 
-        let compressed = compress_dest_size(raw, expected.len(), false).unwrap();
+        let compressed = compress_dest_size(&raw, expected.len(), false).unwrap();
         assert_eq!(compressed, expected);
-        assert_eq!(decompress_safe_partial(expected, raw.len()).unwrap(), raw);
+        assert_eq!(decompress_safe_partial(&expected, raw.len()).unwrap(), raw);
     }
 
     #[test]
     fn matches_frozen_lz4hc9_reference() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4hc9-no-postfix.raw");
-        let expected = include_bytes!("../tests/fixtures/lz4/lz4hc9-no-postfix.lz4");
+        let raw = fixture("lz4/lz4hc9-no-postfix.raw");
+        let expected = fixture("lz4/lz4hc9-no-postfix.lz4");
 
-        let compressed = compress_hc_dest_size(raw, expected.len(), 9, false).unwrap();
+        let compressed = compress_hc_dest_size(&raw, expected.len(), 9, false).unwrap();
         assert_eq!(compressed, expected);
-        assert_eq!(decompress_safe_partial(expected, raw.len()).unwrap(), raw);
+        assert_eq!(decompress_safe_partial(&expected, raw.len()).unwrap(), raw);
     }
 
     #[test]
     fn matches_frozen_zero_padding_layout() {
-        let raw = include_bytes!("../tests/fixtures/lz4/zero-padding-layout.raw");
-        let expected = include_bytes!("../tests/fixtures/lz4/zero-padding-layout.lz4");
+        let raw = fixture("lz4/zero-padding-layout.raw");
+        let expected = fixture("lz4/zero-padding-layout.lz4");
         let (raw_block, compressed_raw) = raw.split_at(32);
         let (expected_raw, expected_compressed) = expected.split_at(32);
 
@@ -379,32 +405,32 @@ mod tests {
 
     #[test]
     fn rejects_invalid_compression_levels() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
+        let raw = fixture("lz4/lz4-no-postfix.raw");
         assert_eq!(
-            compress_hc_dest_size(raw, 512, HC_LEVEL_MIN - 1, false).unwrap_err().status(),
+            compress_hc_dest_size(&raw, 512, HC_LEVEL_MIN - 1, false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            compress_hc_dest_size(raw, 512, HC_LEVEL_MAX + 1, false).unwrap_err().status(),
+            compress_hc_dest_size(&raw, 512, HC_LEVEL_MAX + 1, false).unwrap_err().status(),
             Status::InvalidArgument
         );
     }
 
     #[test]
     fn rejects_zero_or_oversized_inputs() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
-        let expected = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.lz4");
+        let raw = fixture("lz4/lz4-no-postfix.raw");
+        let expected = fixture("lz4/lz4-no-postfix.lz4");
 
         assert_eq!(
             compress_dest_size(&[], 512, false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            compress_dest_size(raw, 0, false).unwrap_err().status(),
+            compress_dest_size(&raw, 0, false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            compress_dest_size(raw, MAX_INPUT_SIZE + 1, false).unwrap_err().status(),
+            compress_dest_size(&raw, MAX_INPUT_SIZE + 1, false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
@@ -412,37 +438,37 @@ mod tests {
             Status::InvalidArgument
         );
         assert_eq!(
-            decompress_safe_partial(expected, 0).unwrap_err().status(),
+            decompress_safe_partial(&expected, 0).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            decompress_safe_partial(expected, MAX_INPUT_SIZE + 1).unwrap_err().status(),
+            decompress_safe_partial(&expected, MAX_INPUT_SIZE + 1).unwrap_err().status(),
             Status::InvalidArgument
         );
     }
 
     #[test]
     fn rejects_stored_not_smaller_than_raw() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
+        let raw = fixture("lz4/lz4-no-postfix.raw");
         assert_eq!(
-            compress_dest_size(raw, raw.len(), false).unwrap_err().status(),
+            compress_dest_size(&raw, raw.len(), false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            compress_dest_size(raw, raw.len() + 10, false).unwrap_err().status(),
+            compress_dest_size(&raw, raw.len() + 10, false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            decompress_safe_partial(raw, raw.len() / 2).unwrap_err().status(),
+            decompress_safe_partial(&raw, raw.len() / 2).unwrap_err().status(),
             Status::InvalidArgument
         );
     }
 
     #[test]
     fn fails_on_corrupted_decompression_input() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
-        let expected = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.lz4");
-        let mut corrupted = expected.to_vec();
+        let raw = fixture("lz4/lz4-no-postfix.raw");
+        let expected = fixture("lz4/lz4-no-postfix.lz4");
+        let mut corrupted = expected.clone();
         corrupted[0] = 0xff;
         corrupted[1] = 0xff;
         assert_eq!(
@@ -453,8 +479,8 @@ mod tests {
 
     #[test]
     fn fails_on_decompression_size_mismatch() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
-        let expected = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.lz4");
+        let raw = fixture("lz4/lz4-no-postfix.raw");
+        let expected = fixture("lz4/lz4-no-postfix.lz4");
         let compressed_end = expected.iter().rposition(|byte| *byte != 0).map_or(0, |i| i + 1);
         assert_eq!(
             decompress_safe_partial(&expected[..compressed_end], raw.len() + 256)
@@ -466,8 +492,8 @@ mod tests {
 
     #[test]
     fn fails_when_output_budget_too_small() {
-        let raw = include_bytes!("../tests/fixtures/lz4/lz4-no-postfix.raw");
-        let error = compress_dest_size(raw, 16, false).unwrap_err();
+        let raw = fixture("lz4/lz4-no-postfix.raw");
+        let error = compress_dest_size(&raw, 16, false).unwrap_err();
         assert!(
             error.status() == Status::CompressionDivergence
                 || error.status() == Status::CompressionFailed

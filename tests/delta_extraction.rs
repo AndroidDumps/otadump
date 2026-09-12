@@ -9,6 +9,8 @@ use prost::Message;
 use ring::digest;
 use tempfile::TempDir;
 
+mod fixture_corpus;
+
 #[derive(Clone, PartialEq, Message)]
 struct Extent {
     #[prost(uint64, optional, tag = "1")]
@@ -149,10 +151,6 @@ const BROTLI_INVALID_HEADER_PATCH: &[u8] = &[
     0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
 ];
 
-const PUFFIN_FIXTURES: &str = "tests/fixtures/puffin";
-const LZ4_FIXTURES: &str = "tests/fixtures/lz4";
-const LZ4DIFF_FIXTURES: &str = "tests/fixtures/lz4diff";
-
 #[cfg(otadump_zucchini)]
 fn brotli_compress(bytes: &[u8]) -> Vec<u8> {
     let mut compressed = Vec::new();
@@ -165,7 +163,7 @@ fn brotli_compress(bytes: &[u8]) -> Vec<u8> {
 
 #[cfg(otadump_zucchini)]
 fn zucchini_brotli_patch(name: &str) -> Vec<u8> {
-    let patch = fs::read(Path::new(ZUCCHINI_FIXTURES).join(format!("{name}.zuc"))).unwrap();
+    let patch = fixture_corpus::read(&format!("zucchini/{name}.zuc"));
     brotli_compress(&patch)
 }
 
@@ -187,11 +185,11 @@ fn truncated_zucchini_patch(name: &str) -> Vec<u8> {
 }
 
 fn lz4_reference(name: &str) -> Vec<u8> {
-    fs::read(Path::new(LZ4_FIXTURES).join(name)).unwrap()
+    fixture_corpus::read(&format!("lz4/{name}"))
 }
 
 fn lz4diff_fixture_case(name: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let patch = fs::read(Path::new(LZ4DIFF_FIXTURES).join(name).join("patch.lz4diff")).unwrap();
+    let patch = fixture_corpus::read(&format!("lz4diff/{name}/patch.lz4diff"));
     let (source, target) = match name {
         "lz4-bsdiff" => {
             let block = lz4_reference("lz4-no-postfix.lz4");
@@ -211,13 +209,10 @@ fn lz4diff_fixture_case(name: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             target[23] ^= 0x5a;
             (source, target)
         }
-        "raw-puffdiff" => {
-            let fixtures = Path::new(LZ4DIFF_FIXTURES).join(name);
-            (
-                fs::read(fixtures.join("source.bin")).unwrap(),
-                fs::read(fixtures.join("target.bin")).unwrap(),
-            )
-        }
+        "raw-puffdiff" => (
+            fixture_corpus::read("lz4diff/raw-puffdiff/source.bin"),
+            fixture_corpus::read("lz4diff/raw-puffdiff/target.bin"),
+        ),
         _ => panic!("unknown LZ4DIFF fixture {name}"),
     };
     (source, target, patch)
@@ -463,7 +458,7 @@ fn run_puffdiff_extraction(source: &[u8], target: &[u8], patch: &[u8]) -> Result
 }
 
 fn puffin_fixture(name: &str) -> Vec<u8> {
-    fs::read(Path::new(PUFFIN_FIXTURES).join(name)).unwrap()
+    fixture_corpus::read(&format!("puffin/{name}"))
 }
 
 fn with_puffin_patch_type(patch: &[u8], patch_type: u8) -> Vec<u8> {
@@ -473,6 +468,14 @@ fn with_puffin_patch_type(patch: &[u8], patch_type: u8) -> Vec<u8> {
     changed.extend_from_slice(&[0x20, patch_type]);
     changed.extend_from_slice(&patch[8 + header_len..]);
     changed[4..8].copy_from_slice(&((header_len + 2) as u32).to_be_bytes());
+    changed
+}
+
+fn with_puffin_inner_patch(patch: &[u8], inner_patch: &[u8]) -> Vec<u8> {
+    let header_len = u32::from_be_bytes(patch[4..8].try_into().unwrap()) as usize;
+    let mut changed = Vec::with_capacity(8 + header_len + inner_patch.len());
+    changed.extend_from_slice(&patch[..8 + header_len]);
+    changed.extend_from_slice(inner_patch);
     changed
 }
 
@@ -574,23 +577,18 @@ fn malformed_puffdiff_zucchini_fails_without_publication_or_process_failure() {
 }
 
 #[cfg(otadump_zucchini)]
-const ZUCCHINI_FIXTURES: &str = "tests/fixtures/zucchini";
-
-#[cfg(otadump_zucchini)]
 fn assert_zucchini_fixture(name: &str, extension: &str) {
-    let fixtures = Path::new(ZUCCHINI_FIXTURES);
-    let old = fs::read(fixtures.join(format!("{name}-old{extension}"))).unwrap();
-    let expected = fs::read(fixtures.join(format!("{name}-new{extension}"))).unwrap();
-    let patch = fs::read(fixtures.join(format!("{name}.zuc"))).unwrap();
+    let old = fixture_corpus::read(&format!("zucchini/{name}-old{extension}"));
+    let expected = fixture_corpus::read(&format!("zucchini/{name}-new{extension}"));
+    let patch = fixture_corpus::read(&format!("zucchini/{name}.zuc"));
     let output = otadump::zucchini::apply(&old, &patch, expected.len()).unwrap();
     assert_eq!(output, expected);
 }
 
 #[cfg(otadump_zucchini)]
 fn assert_zucchini_extraction(name: &str, extension: &str) {
-    let fixtures = Path::new(ZUCCHINI_FIXTURES);
-    let old = fs::read(fixtures.join(format!("{name}-old{extension}"))).unwrap();
-    let target = fs::read(fixtures.join(format!("{name}-new{extension}"))).unwrap();
+    let old = fixture_corpus::read(&format!("zucchini/{name}-old{extension}"));
+    let target = fixture_corpus::read(&format!("zucchini/{name}-new{extension}"));
     let patch = zucchini_brotli_patch(name);
     let temporary = TempDir::new().unwrap();
     let source_dir = temporary.path().join("source");
@@ -744,11 +742,16 @@ fn zucchini_wrapper_applies_large_dex_jumbo_reference() {
 
 #[test]
 #[cfg(otadump_zucchini)]
+fn zucchini_wrapper_matches_annotation_jvm_parity_golden() {
+    assert_zucchini_fixture("annotation-jvm", ".dex");
+}
+
+#[test]
+#[cfg(otadump_zucchini)]
 fn zucchini_wrapper_rejects_unsafe_large_dex_string16_reference() {
-    let fixtures = Path::new(ZUCCHINI_FIXTURES);
-    let old = fs::read(fixtures.join("dex-large-old.dex")).unwrap();
-    let patch = fs::read(fixtures.join("dex-large-unsafe16.zuc")).unwrap();
-    let expected_size = fs::metadata(fixtures.join("dex-large-new.dex")).unwrap().len() as usize;
+    let old = fixture_corpus::read("zucchini/dex-large-old.dex");
+    let patch = fixture_corpus::read("zucchini/dex-large-unsafe16.zuc");
+    let expected_size = fixture_corpus::read("zucchini/dex-large-new.dex").len();
     let error = otadump::zucchini::apply(&old, &patch, expected_size).unwrap_err();
     assert_eq!(error.status(), otadump::zucchini::Status::ApplyError);
     assert_eq!(error.to_string(), "android executable preflight failed");
@@ -1478,7 +1481,7 @@ fn fec_extents_match_android_reference_vectors() {
                 .map(|index| ((index % 4096) * 37 + (index / 4096) * 53 + 13) as u8)
                 .collect()
         };
-        let fec = fs::read(Path::new("tests/fixtures/fec").join(fixture)).unwrap();
+        let fec = fixture_corpus::read(&format!("fec/{fixture}"));
         let mut target = data.clone();
         target.extend_from_slice(&fec);
         let manifest = DeltaArchiveManifest {
