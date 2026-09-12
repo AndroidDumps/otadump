@@ -175,43 +175,6 @@ fn pure_rust_honors_cancellation() {
     assert_eq!(error.status(), Status::Cancelled);
 }
 
-/// Differential check against the vendored C++ implementation. Only compiled
-/// when `OTADUMP_NATIVE_ZUCCHINI=1` selected the native build.
-#[cfg(otadump_native_zucchini)]
-#[test]
-fn native_and_pure_agree_on_all_fixtures() {
-    let cases: &[(&str, &str, &str)] = &[
-        ("noop-old.bin", "noop.zuc", "noop-new.bin"),
-        ("elf-x86-old", "elf-x86.zuc", "elf-x86-new"),
-        ("elf-old", "elf.zuc", "elf-new"),
-        ("elf-arm32-old", "elf-arm32.zuc", "elf-arm32-new"),
-        ("elf-arm64-old", "elf-arm64.zuc", "elf-arm64-new"),
-        ("dex-old.dex", "dex.zuc", "dex-new.dex"),
-        ("dex-large-old.dex", "dex-large.zuc", "dex-large-new.dex"),
-        ("dex-large-old.dex", "dex-large-unsafe16.zuc", "dex-large-new.dex"),
-    ];
-    let fixtures = Path::new(FIXTURES);
-    for (old_name, patch_name, new_name) in cases {
-        let old = fs::read(fixtures.join(old_name)).unwrap();
-        let patch = fs::read(fixtures.join(patch_name)).unwrap();
-        let size = fs::metadata(fixtures.join(new_name)).unwrap().len() as usize;
-
-        let pure = zucchini_pure::apply(&old, &patch, size);
-        let native = otadump::zucchini::apply_native(&old, &patch, size);
-        match (pure, native) {
-            (Ok(a), Ok(b)) => assert_eq!(a, b, "output mismatch for {patch_name}"),
-            (Err(a), Err(b)) => assert_eq!(
-                format!("{:?}", a.status()),
-                format!("{:?}", b.status()),
-                "status mismatch for {patch_name}"
-            ),
-            (a, b) => panic!(
-                "pure {a:?} and native {b:?} disagree for {patch_name}"
-            ),
-        }
-    }
-}
-
 /// Cancellation occurring while the Android preflight is running must surface
 /// as `Status::Cancelled`, not be folded into the preflight `ApplyError`.
 #[test]

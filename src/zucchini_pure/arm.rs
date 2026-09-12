@@ -66,11 +66,7 @@ pub fn store_thumb2_code32(image: &mut [u8], offset: u32, code: u32) {
 }
 
 pub fn get_thumb2_instruction_size(code16: u16) -> u32 {
-    if (code16 & 0xF000) == 0xF000 || (code16 & 0xF800) == 0xE800 {
-        4
-    } else {
-        2
-    }
+    if (code16 & 0xF000) == 0xF000 || (code16 & 0xF800) == 0xE800 { 4 } else { 2 }
 }
 
 /// Mirrors `AArch32Rel32Translator::DecodeA24`.
@@ -329,11 +325,7 @@ pub fn encode_t24(disp: i32, code32: &mut u32) -> bool {
         let i1 = bit(disp as u32, 23);
         let s = bit(disp as u32, 24);
         t &= 0xF800_D000;
-        t |= (s << 26)
-            | (imm10 << 16)
-            | ((i1 ^ s ^ 1) << 13)
-            | ((i2 ^ s ^ 1) << 11)
-            | imm11;
+        t |= (s << 26) | (imm10 << 16) | ((i1 ^ s ^ 1) << 13) | ((i2 ^ s ^ 1) << 11) | imm11;
         *code32 = t;
         return true;
     }

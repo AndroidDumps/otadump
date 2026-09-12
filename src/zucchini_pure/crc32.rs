@@ -27,24 +27,15 @@ pub const CRC_POLL_CHUNK: usize = 1 << 20;
 
 /// Same as [`calculate_crc32`], but polls `cancelled` between chunks and
 /// returns `Status::Cancelled` instead of running to completion.
-pub fn calculate_crc32_cancel(
-    data: &[u8],
-    cancelled: &dyn Fn() -> bool,
-) -> super::Result<u32> {
+pub fn calculate_crc32_cancel(data: &[u8], cancelled: &dyn Fn() -> bool) -> super::Result<u32> {
     if cancelled() {
-        return Err(super::Error::new(
-            super::Status::Cancelled,
-            "Zucchini apply cancelled",
-        ));
+        return Err(super::Error::new(super::Status::Cancelled, "Zucchini apply cancelled"));
     }
     let table = make_crc32_table();
     let mut ret = 0xFFFF_FFFFu32;
     for chunk in data.chunks(CRC_POLL_CHUNK) {
         if cancelled() {
-            return Err(super::Error::new(
-                super::Status::Cancelled,
-                "Zucchini apply cancelled",
-            ));
+            return Err(super::Error::new(super::Status::Cancelled, "Zucchini apply cancelled"));
         }
         for &byte in chunk {
             ret = table[((ret ^ byte as u32) & 0xFF) as usize] ^ (ret >> 8);

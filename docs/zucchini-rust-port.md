@@ -142,11 +142,5 @@ group and range on the ELF/DEX fixtures.
 
 ## Remaining work
 
-1. **Differential testing.** Building the native path
-   (`OTADUMP_NATIVE_ZUCCHINI=1 cargo test`, exact value `1` required) enables
-   `native_and_pure_agree_on_all_fixtures`. That build currently fails to link in
-   this environment on pre-existing libchrome symbols
-   (`base::Histogram::FactoryGet` from `activity_tracker.cc`), unrelated to the
-   Rust port; the default, pure build is unaffected.
-2. **Non-Android formats (Win32, ZTF).** Not emitted by Android payloads and
+1. **Non-Android formats (Win32, ZTF).** Not emitted by Android payloads and
    intentionally rejected.

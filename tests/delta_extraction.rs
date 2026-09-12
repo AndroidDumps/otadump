@@ -409,14 +409,6 @@ fn with_puffin_patch_type(patch: &[u8], patch_type: u8) -> Vec<u8> {
     changed
 }
 
-fn with_puffin_inner_patch(patch: &[u8], inner_patch: &[u8]) -> Vec<u8> {
-    let header_len = u32::from_be_bytes(patch[4..8].try_into().unwrap()) as usize;
-    let mut changed = Vec::with_capacity(8 + header_len + inner_patch.len());
-    changed.extend_from_slice(&patch[..8 + header_len]);
-    changed.extend_from_slice(inner_patch);
-    changed
-}
-
 #[test]
 fn puffdiff_bsdiff_reconstructs_pinned_puffin_goldens() {
     let source = puffin_fixture("deflates-sample1.bin");

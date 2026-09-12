@@ -32,8 +32,8 @@ mod elf;
 mod engine;
 pub mod patch;
 
-pub use engine::Reference;
 pub use elf::ElfDisassembler;
+pub use engine::Reference;
 
 /// Exclusive upper bound for buffers represented by Zucchini offsets.
 pub const OFFSET_BOUND: usize = (u32::MAX / 2) as usize;
@@ -172,7 +172,10 @@ fn apply_inner(
 
     let mut output = Vec::new();
     output.try_reserve_exact(output_size).map_err(|error| {
-        Error::new(Status::AllocationFailure, format!("unable to allocate Zucchini output: {error}"))
+        Error::new(
+            Status::AllocationFailure,
+            format!("unable to allocate Zucchini output: {error}"),
+        )
     })?;
     output.resize(output_size, 0);
 
@@ -191,12 +194,11 @@ fn apply_inner(
         // for every equivalence in both phases).
         let (old_element, new_element) = engine::element_regions(old, element, &mut output)?;
         let analysis = engine::analyze_element(exe_type, old_element)?;
-        engine::preflight_element(element, old_element, new_element, &analysis, cancelled).map_err(
-            |error| match error.status() {
+        engine::preflight_element(element, old_element, new_element, &analysis, cancelled)
+            .map_err(|error| match error.status() {
                 Status::Cancelled => error,
                 _ => Error::new(Status::ApplyError, "android executable preflight failed"),
-            },
-        )?;
+            })?;
         let (old_element, new_element) = engine::element_regions(old, element, &mut output)?;
         engine::apply_element(element, old_element, new_element, &analysis, cancelled)?;
     }
@@ -219,12 +221,11 @@ pub(crate) fn is_android_executable(exe_type: u32) -> bool {
 }
 
 /// Dispatches to the format disassembler for `exe_type`, parsing `image`.
-pub(crate) fn make_disassembler(
-    exe_type: u32,
-    image: &[u8],
-) -> Option<Box<dyn Disassembler>> {
+pub(crate) fn make_disassembler(exe_type: u32, image: &[u8]) -> Option<Box<dyn Disassembler>> {
     match exe_type {
-        patch::EXE_TYPE_NOOP => Some(Box::new(engine::NoOpDisassembler { size: image.len() as u32 })),
+        patch::EXE_TYPE_NOOP => {
+            Some(Box::new(engine::NoOpDisassembler { size: image.len() as u32 }))
+        }
         patch::EXE_TYPE_ELF_X86 => {
             elf::ElfDisassembler::parse(elf::ElfKind::X86, image).map(|d| Box::new(d) as _)
         }
@@ -237,9 +238,7 @@ pub(crate) fn make_disassembler(
         patch::EXE_TYPE_ELF_AARCH64 => {
             elf::ElfDisassembler::parse(elf::ElfKind::AArch64, image).map(|d| Box::new(d) as _)
         }
-        patch::EXE_TYPE_DEX => {
-            dex::DexDisassembler::parse(image).map(|d| Box::new(d) as _)
-        }
+        patch::EXE_TYPE_DEX => dex::DexDisassembler::parse(image).map(|d| Box::new(d) as _),
         _ => None,
     }
 }

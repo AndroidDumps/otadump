@@ -20,6 +20,8 @@ enum Algorithm {
     Brotli,
 }
 
+type ParsedPatch = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
+
 fn algorithm_from_byte(value: u8) -> Result<Algorithm> {
     match value {
         0 => Ok(Algorithm::None),
@@ -34,11 +36,7 @@ fn algorithm_from_byte(value: u8) -> Result<Algorithm> {
 #[inline]
 fn offtin(buf: [u8; 8]) -> i64 {
     let value = i64::from_le_bytes(buf);
-    if value & (1 << 63) == 0 {
-        value
-    } else {
-        -(value & !(1 << 63))
-    }
+    if value & (1 << 63) == 0 { value } else { -(value & !(1 << 63)) }
 }
 
 fn decompress_bz2(data: &[u8]) -> Result<Vec<u8>> {
@@ -65,7 +63,7 @@ fn decompress(algorithm: Algorithm, data: &[u8]) -> Result<Vec<u8>> {
 
 /// Parses a BSDIFF40/BSDF2 patch header and returns the decompressed
 /// `(new_size, control, diff, extra)` streams.
-pub fn parse_header(patch: &[u8]) -> Result<(i64, Vec<u8>, Vec<u8>, Vec<u8>)> {
+pub fn parse_header(patch: &[u8]) -> Result<ParsedPatch> {
     ensure!(patch.len() >= 32, "Patch data too short");
 
     let magic = &patch[0..8];
@@ -88,8 +86,7 @@ pub fn parse_header(patch: &[u8]) -> Result<(i64, Vec<u8>, Vec<u8>, Vec<u8>)> {
         control_length >= 0 && diff_length >= 0 && new_size >= 0,
         "Negative length in patch header"
     );
-    let (control_length, diff_length) =
-        (control_length as usize, diff_length as usize);
+    let (control_length, diff_length) = (control_length as usize, diff_length as usize);
 
     let control_end = 32usize
         .checked_add(control_length)
@@ -101,10 +98,7 @@ pub fn parse_header(patch: &[u8]) -> Result<(i64, Vec<u8>, Vec<u8>, Vec<u8>)> {
     ensure!(diff_end <= patch.len(), "Diff stream exceeds patch bounds");
 
     let control = decompress(control_algorithm, &patch[32..control_end])?;
-    ensure!(
-        control.len() % 24 == 0,
-        "Invalid control data length (not multiple of 24)"
-    );
+    ensure!(control.len() % 24 == 0, "Invalid control data length (not multiple of 24)");
     let diff = decompress(diff_algorithm, &patch[control_end..diff_end])?;
     let extra = decompress(extra_algorithm, &patch[diff_end..])?;
     Ok((new_size, control, diff, extra))

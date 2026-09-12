@@ -120,7 +120,7 @@ profile keeps unwinding so Python wheels can raise panics as exceptions).
 Build the ABI3 Python wheel with `uv build --wheel`.
 The wheel supports Python 3.9 and later and uses the build host's glibc baseline.
 Build release packages on the oldest Linux environment that you support.
-Release archives and wheels include the notices for vendored Puffin, LZ4, Zucchini, libchrome, ICU, and NSPR code.
+Release archives and wheels include the notices for vendored Puffin and LZ4 code.
 
 ## Contributors
 

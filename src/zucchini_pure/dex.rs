@@ -2,8 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use super::bytes::{align_ceil, read_i16, read_i32, read_i8, read_u16, read_u32, write_u16, write_u32};
-use super::{Disassembler, GroupTraits, Reference, Result, K_INVALID_OFFSET, OFFSET_BOUND};
+use super::bytes::{
+    align_ceil, read_i8, read_i16, read_i32, read_u16, read_u32, write_u16, write_u32,
+};
+use super::{Disassembler, GroupTraits, K_INVALID_OFFSET, OFFSET_BOUND, Reference, Result};
 
 const HEADER_SIZE: usize = 112;
 const CODE_ITEM_HEADER: usize = 16;
@@ -133,7 +135,11 @@ fn find_instruction(opcode: u8) -> Option<Bytecode> {
         .find(|(start, _, _, variant)| {
             opcode >= u16::from(*start) && opcode < u16::from(*start) + u16::from(*variant)
         })
-        .map(|(start, layout, format, _)| Bytecode { opcode: *start, layout: *layout, format: *format })
+        .map(|(start, layout, format, _)| Bytecode {
+            opcode: *start,
+            layout: *layout,
+            format: *format,
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -226,8 +232,7 @@ impl DexDisassembler {
         let code_map = get(T_CODE_ITEM);
 
         let type_list_offsets = parse_item_offsets(image, type_list_map, 2)?;
-        let annotation_set_ref_list_offsets =
-            parse_item_offsets(image, annotation_set_ref_map, 4)?;
+        let annotation_set_ref_list_offsets = parse_item_offsets(image, annotation_set_ref_map, 4)?;
         let annotation_set_offsets = parse_item_offsets(image, annotation_set_map, 4)?;
         let (
             annotations_directory_item_offsets,
@@ -299,7 +304,9 @@ fn read_dex_header(image: &[u8]) -> Option<(u32, u32)> {
     }
     let file_size = read_u32(image, 32)?;
     let map_off = read_u32(image, 52)?;
-    if file_size > image.len() as u32 || file_size < HEADER_SIZE as u32 || map_off < HEADER_SIZE as u32
+    if file_size > image.len() as u32
+        || file_size < HEADER_SIZE as u32
+        || map_off < HEADER_SIZE as u32
     {
         return None;
     }
@@ -332,14 +339,8 @@ pub(crate) fn read_map_item(image: &[u8], desired: u16) -> Option<MapItem> {
 /// Mirrors the FFI's `ValidateDexWriterWidths`: the narrow fixed-size lists must
 /// fit a 16-bit writer.
 pub(crate) fn narrow_writer_widths_ok(image: &[u8]) -> bool {
-    const NARROW_TYPES: [u16; 6] = [
-        T_TYPE_ID,
-        T_PROTO_ID,
-        T_FIELD_ID,
-        T_METHOD_ID,
-        T_CALL_SITE_ID,
-        T_METHOD_HANDLE,
-    ];
+    const NARROW_TYPES: [u16; 6] =
+        [T_TYPE_ID, T_PROTO_ID, T_FIELD_ID, T_METHOD_ID, T_CALL_SITE_ID, T_METHOD_HANDLE];
     for kind in NARROW_TYPES {
         if let Some(item) = read_map_item(image, kind) {
             if item.size > u32::from(u16::MAX) + 1 {
@@ -355,11 +356,7 @@ pub(crate) fn string_ids(image: &[u8]) -> Option<MapItem> {
     read_map_item(image, T_STRING_ID)
 }
 
-fn parse_item_offsets(
-    image: &[u8],
-    map_item: MapItem,
-    item_width: usize,
-) -> Option<Vec<u32>> {
+fn parse_item_offsets(image: &[u8], map_item: MapItem, item_width: usize) -> Option<Vec<u32>> {
     if !covers_array(image, map_item.offset as usize, map_item.size as usize, 4) {
         return None;
     }
@@ -401,17 +398,18 @@ fn parse_annotations_directory_items(
     directory_offsets.try_reserve(map_item.size as usize).ok()?;
     let mut pos = map_item.offset as usize;
 
-    let parse_list = |pos: &mut usize, count: u32, width: usize, out: &mut Vec<u32>| -> Option<()> {
-        if (image.len() - *pos) / width < count as usize {
-            return None;
-        }
-        out.try_reserve(count as usize).ok()?;
-        for _ in 0..count {
-            out.push(*pos as u32);
-            *pos += width;
-        }
-        Some(())
-    };
+    let parse_list =
+        |pos: &mut usize, count: u32, width: usize, out: &mut Vec<u32>| -> Option<()> {
+            if (image.len() - *pos) / width < count as usize {
+                return None;
+            }
+            out.try_reserve(count as usize).ok()?;
+            for _ in 0..count {
+                out.push(*pos as u32);
+                *pos += width;
+            }
+            Some(())
+        };
 
     for _ in 0..map_item.size {
         let aligned = align_ceil(pos as u64, 4) as usize;
@@ -565,12 +563,12 @@ fn skip_leb128(image: &[u8], pos: &mut usize) -> bool {
 
 fn build_groups() -> Vec<GroupTraits> {
     const WIDTHS: [u32; 42] = [
-        4, 4, 4, 4, 4, 2, 4, 4, 2, 2, 2, 4, 4, 2, 2, 2, 2, 2, 2, 4, 2, 2, 4, 4, 2, 2, 4, 4, 4,
-        4, 4, 4, 4, 4, 1, 2, 4, 4, 4, 4, 4, 4,
+        4, 4, 4, 4, 4, 2, 4, 4, 2, 2, 2, 4, 4, 2, 2, 2, 2, 2, 2, 4, 2, 2, 4, 4, 2, 2, 4, 4, 4, 4,
+        4, 4, 4, 4, 1, 2, 4, 4, 4, 4, 4, 4,
     ];
     const POOLS: [u8; 42] = [
-        0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 6, 7, 7, 8,
-        9, 9, 9, 9, 10, 11, 11, 11, 12, 13, 14, 15, 16,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 6, 7, 7, 8, 9,
+        9, 9, 9, 10, 11, 11, 11, 12, 13, 14, 15, 16,
     ];
     (0..42)
         .map(|index| GroupTraits {
@@ -619,13 +617,7 @@ enum CodeFilter {
     Rel32,
 }
 
-fn read_target_index(
-    image: &[u8],
-    map: MapItem,
-    item_size: u32,
-    location: u32,
-    width: u8,
-) -> u32 {
+fn read_target_index(image: &[u8], map: MapItem, item_size: u32, location: u32, width: u8) -> u32 {
     let unsafe_idx = if width == 2 {
         u32::from(read_u16(image, location as usize).unwrap_or(0))
     } else {
@@ -825,8 +817,7 @@ fn parse_instructions(image: &[u8], base_offset: u32) -> Result<Vec<InstructionV
             // The native bound is relative to the remaining instruction bytes
             // from the current instruction, not the whole code item.
             let remaining_units = (insns_end - pos) as u32 / 2;
-            if payload_rel < i32::from(instruction.layout)
-                || payload_rel as u32 >= remaining_units
+            if payload_rel < i32::from(instruction.layout) || payload_rel as u32 >= remaining_units
             {
                 break;
             }
@@ -865,9 +856,7 @@ fn filter_location(filter: CodeFilter, value: InstructionValue) -> Option<u32> {
         CodeFilter::Field if format_c && matches!(value.opcode, 0x52 | 0x60) => {
             value.instr_offset + 2
         }
-        CodeFilter::Method
-            if format_c && matches!(value.opcode, 0x6E | 0x74 | 0xFA | 0xFB) =>
-        {
+        CodeFilter::Method if format_c && matches!(value.opcode, 0x6E | 0x74 | 0xFA | 0xFB) => {
             value.instr_offset + 2
         }
         CodeFilter::Rel8 if format_t && value.opcode == 0x28 => value.instr_offset + 1,
@@ -898,7 +887,8 @@ fn run_instr_mapper(mapper: InstrMapper, image: &[u8], location: u32) -> u32 {
         InstrMapper::RelCode32 => {
             let delta = read_i32(image, location as usize).unwrap_or(0);
             let target = i64::from(location) + i64::from(delta - 1) * 2;
-            if !(0..=u32::MAX as i64).contains(&target) || target >= i64::from(OFFSET_BOUND as u32) {
+            if !(0..=u32::MAX as i64).contains(&target) || target >= i64::from(OFFSET_BOUND as u32)
+            {
                 K_INVALID_OFFSET
             } else {
                 target as u32
@@ -1025,16 +1015,10 @@ impl Disassembler for DexDisassembler {
         // every index-based mapper (e.g. annotations-directory ids are 32-bit),
         // so derive it instead of hardcoding per group.
         let width = self.groups[group].width as u8;
-        let string_index = |width: u8| ItemMapper::TargetIndex {
-            map: self.string_map,
-            item_size: 4,
-            width,
-        };
-        let type_index = |width: u8| ItemMapper::TargetIndex {
-            map: self.type_map,
-            item_size: 4,
-            width,
-        };
+        let string_index =
+            |width: u8| ItemMapper::TargetIndex { map: self.string_map, item_size: 4, width };
+        let type_index =
+            |width: u8| ItemMapper::TargetIndex { map: self.type_map, item_size: 4, width };
         let proto_index = ItemMapper::TargetIndex { map: self.proto_map, item_size: 12, width };
         match group {
             0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(width), false),
@@ -1191,7 +1175,9 @@ impl Disassembler for DexDisassembler {
                 CodeFilter::MethodHandle,
                 InstrMapper::TargetIndex { map: self.method_handle_map, item_size: 8, width },
             ),
-            26 => item_reader(image, lo, hi, self.proto_map, 12, 8, ItemMapper::TargetOffset32, false),
+            26 => {
+                item_reader(image, lo, hi, self.proto_map, 12, 8, ItemMapper::TargetOffset32, false)
+            }
             27 => item_reader(
                 image,
                 lo,
@@ -1282,7 +1268,9 @@ impl Disassembler for DexDisassembler {
                 CodeFilter::Rel32,
                 InstrMapper::RelCode32,
             ),
-            37 => item_reader(image, lo, hi, self.string_map, 4, 0, ItemMapper::TargetOffset32, false),
+            37 => {
+                item_reader(image, lo, hi, self.string_map, 4, 0, ItemMapper::TargetOffset32, false)
+            }
             38 => cached_item_list_reader(
                 image,
                 lo,

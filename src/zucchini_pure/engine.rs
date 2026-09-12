@@ -3,15 +3,15 @@
 
 use std::collections::BTreeMap;
 
-use super::bytes::{range_is_bounded, range_covers};
+use super::bytes::{range_covers, range_is_bounded};
 use super::dex;
 use super::patch::{
-    Equivalence, PatchElement, EXE_TYPE_DEX, EXE_TYPE_ELF_AARCH32, EXE_TYPE_ELF_AARCH64,
-    EXE_TYPE_ELF_X64, EXE_TYPE_ELF_X86, EXE_TYPE_NOOP,
+    EXE_TYPE_DEX, EXE_TYPE_ELF_AARCH32, EXE_TYPE_ELF_AARCH64, EXE_TYPE_ELF_X64, EXE_TYPE_ELF_X86,
+    EXE_TYPE_NOOP, Equivalence, PatchElement,
 };
 use super::{
-    is_android_executable, make_disassembler, Disassembler, Error, GroupTraits, Result, Status,
-    K_INVALID_OFFSET, OFFSET_BOUND,
+    Disassembler, Error, GroupTraits, K_INVALID_OFFSET, OFFSET_BOUND, Result, Status,
+    is_android_executable, make_disassembler,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,9 +249,9 @@ fn validate_reference_boundaries(
                 {
                     return Ok(false);
                 }
-                let projected = equivalence.dst_offset.wrapping_add(
-                    reference.location.wrapping_sub(equivalence.src_offset),
-                );
+                let projected = equivalence
+                    .dst_offset
+                    .wrapping_add(reference.location.wrapping_sub(equivalence.src_offset));
                 if projected > new_size || writer_width > new_size - projected {
                     return Ok(false);
                 }
@@ -279,11 +279,8 @@ fn validate_dex_reference_targets(
     }
 
     let mut deltas = element.reference_deltas.iter();
-    let mapper = OffsetMapper::new(
-        &element.equivalences,
-        old_disasm.size(),
-        new_image.len() as u32,
-    )?;
+    let mapper =
+        OffsetMapper::new(&element.equivalences, old_disasm.size(), new_image.len() as u32)?;
 
     for (pool_tag, sub_groups) in &pools {
         check_not_cancelled(cancelled)?;
@@ -394,9 +391,7 @@ fn apply_equivalence_and_extra_data(
 }
 
 fn take_extra<'a>(extra: &'a [u8], cursor: &mut usize, size: usize) -> Result<&'a [u8]> {
-    let end = cursor
-        .checked_add(size)
-        .ok_or_else(|| apply_error("extra data length overflow"))?;
+    let end = cursor.checked_add(size).ok_or_else(|| apply_error("extra data length overflow"))?;
     let slice = extra.get(*cursor..end).ok_or_else(|| apply_error("extra data exhausted"))?;
     *cursor = end;
     Ok(slice)
@@ -473,11 +468,8 @@ fn apply_references_correction(
 
     let old_groups = old_disasm.groups();
     let new_groups = new_disasm.groups();
-    let mapper = OffsetMapper::new(
-        &element.equivalences,
-        old_image.len() as u32,
-        new_image.len() as u32,
-    )?;
+    let mapper =
+        OffsetMapper::new(&element.equivalences, old_image.len() as u32, new_image.len() as u32)?;
 
     let mut pools: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
     for (index, group) in old_groups.iter().enumerate() {
@@ -567,9 +559,8 @@ impl OffsetMapper {
     fn extended_forward_project(&self, offset: u32) -> u32 {
         if offset < self.old_image_size {
             // First equivalence with `src_offset > offset`.
-            let pos = self
-                .equivalences
-                .partition_point(|equivalence| equivalence.src_offset <= offset);
+            let pos =
+                self.equivalences.partition_point(|equivalence| equivalence.src_offset <= offset);
             let mut chosen = pos;
             if pos != 0 {
                 let back = self.equivalences[pos - 1];
@@ -598,8 +589,7 @@ impl OffsetMapper {
             {
                 current += 1;
             }
-            if current < self.equivalences.len()
-                && self.equivalences[current].src_offset <= *source
+            if current < self.equivalences.len() && self.equivalences[current].src_offset <= *source
             {
                 *source = *source - self.equivalences[current].src_offset
                     + self.equivalences[current].dst_offset;
@@ -823,8 +813,7 @@ impl PruneEquivalencesAndSortBySource {
                     break;
                 }
                 if equivalences[current].length < equivalences[next].length {
-                    let delta =
-                        equivalences[current].src_end() - equivalences[next].src_offset;
+                    let delta = equivalences[current].src_end() - equivalences[next].src_offset;
                     equivalences[current].length -= delta;
                     next_is_reaper = true;
                     break;
@@ -839,8 +828,7 @@ impl PruneEquivalencesAndSortBySource {
                 current = next;
             } else {
                 for reduced in (current + 1)..next {
-                    let delta =
-                        equivalences[current].src_end() - equivalences[reduced].src_offset;
+                    let delta = equivalences[current].src_end() - equivalences[reduced].src_offset;
                     let shrink = equivalences[reduced].length.min(delta);
                     equivalences[reduced].length -= shrink;
                     equivalences[reduced].src_offset += delta;
@@ -940,8 +928,7 @@ mod tests {
             let disasm = make_disassembler(exe_type, &image).unwrap();
             let cache = GroupRefCache::build(&*disasm, &image).unwrap();
             let size = disasm.size();
-            let ranges =
-                [(0, size), (0, size / 3), (size / 3, size * 2 / 3), (size * 2 / 3, size)];
+            let ranges = [(0, size), (0, size / 3), (size / 3, size * 2 / 3), (size * 2 / 3, size)];
             for group in 0..disasm.groups().len() {
                 for &(lo, hi) in &ranges {
                     if lo > hi || hi > size {
@@ -970,22 +957,113 @@ mod native_sort_tests {
     /// libstdc++ on this 48-element tie-heavy input.
     #[test]
     fn sort_reproduces_native_tie_order() {
-        let input: [(u32, u32, u32); 48] = [(0, 1000, 1), (5, 1001, 2), (10, 1002, 3), (15, 1003, 4), (6, 1004, 5), (11, 1005, 1), (16, 1006, 2), (4, 1007, 3), (12, 1008, 4), (0, 1009, 5), (5, 1010, 1), (10, 1011, 2), (1, 1012, 3), (6, 1013, 4), (11, 1014, 5), (16, 1015, 1), (7, 1016, 2), (12, 1017, 3), (0, 1018, 4), (5, 1019, 5), (13, 1020, 1), (1, 1021, 2), (6, 1022, 3), (11, 1023, 4), (2, 1024, 5), (7, 1025, 1), (12, 1026, 2), (0, 1027, 3), (8, 1028, 4), (13, 1029, 5), (1, 1030, 1), (6, 1031, 2), (14, 1032, 3), (2, 1033, 4), (7, 1034, 5), (12, 1035, 1), (3, 1036, 2), (8, 1037, 3), (13, 1038, 4), (1, 1039, 5), (9, 1040, 1), (14, 1041, 2), (2, 1042, 3), (7, 1043, 4), (15, 1044, 5), (3, 1045, 1), (8, 1046, 2), (13, 1047, 3)];
-        let expected: [(u32, u32, u32); 48] = [(0, 1000, 1), (0, 1009, 5), (0, 1027, 3), (0, 1018, 4), (1, 1039, 5), (1, 1030, 1), (1, 1012, 3), (1, 1021, 2), (2, 1042, 3), (2, 1033, 4), (2, 1024, 5), (3, 1045, 1), (3, 1036, 2), (4, 1007, 3), (5, 1001, 2), (5, 1019, 5), (5, 1010, 1), (6, 1004, 5), (6, 1031, 2), (6, 1022, 3), (6, 1013, 4), (7, 1025, 1), (7, 1016, 2), (7, 1043, 4), (7, 1034, 5), (8, 1037, 3), (8, 1028, 4), (8, 1046, 2), (9, 1040, 1), (10, 1011, 2), (10, 1002, 3), (11, 1014, 5), (11, 1023, 4), (11, 1005, 1), (12, 1008, 4), (12, 1035, 1), (12, 1017, 3), (12, 1026, 2), (13, 1047, 3), (13, 1038, 4), (13, 1029, 5), (13, 1020, 1), (14, 1041, 2), (14, 1032, 3), (15, 1003, 4), (15, 1044, 5), (16, 1006, 2), (16, 1015, 1)];
+        let input: [(u32, u32, u32); 48] = [
+            (0, 1000, 1),
+            (5, 1001, 2),
+            (10, 1002, 3),
+            (15, 1003, 4),
+            (6, 1004, 5),
+            (11, 1005, 1),
+            (16, 1006, 2),
+            (4, 1007, 3),
+            (12, 1008, 4),
+            (0, 1009, 5),
+            (5, 1010, 1),
+            (10, 1011, 2),
+            (1, 1012, 3),
+            (6, 1013, 4),
+            (11, 1014, 5),
+            (16, 1015, 1),
+            (7, 1016, 2),
+            (12, 1017, 3),
+            (0, 1018, 4),
+            (5, 1019, 5),
+            (13, 1020, 1),
+            (1, 1021, 2),
+            (6, 1022, 3),
+            (11, 1023, 4),
+            (2, 1024, 5),
+            (7, 1025, 1),
+            (12, 1026, 2),
+            (0, 1027, 3),
+            (8, 1028, 4),
+            (13, 1029, 5),
+            (1, 1030, 1),
+            (6, 1031, 2),
+            (14, 1032, 3),
+            (2, 1033, 4),
+            (7, 1034, 5),
+            (12, 1035, 1),
+            (3, 1036, 2),
+            (8, 1037, 3),
+            (13, 1038, 4),
+            (1, 1039, 5),
+            (9, 1040, 1),
+            (14, 1041, 2),
+            (2, 1042, 3),
+            (7, 1043, 4),
+            (15, 1044, 5),
+            (3, 1045, 1),
+            (8, 1046, 2),
+            (13, 1047, 3),
+        ];
+        let expected: [(u32, u32, u32); 48] = [
+            (0, 1000, 1),
+            (0, 1009, 5),
+            (0, 1027, 3),
+            (0, 1018, 4),
+            (1, 1039, 5),
+            (1, 1030, 1),
+            (1, 1012, 3),
+            (1, 1021, 2),
+            (2, 1042, 3),
+            (2, 1033, 4),
+            (2, 1024, 5),
+            (3, 1045, 1),
+            (3, 1036, 2),
+            (4, 1007, 3),
+            (5, 1001, 2),
+            (5, 1019, 5),
+            (5, 1010, 1),
+            (6, 1004, 5),
+            (6, 1031, 2),
+            (6, 1022, 3),
+            (6, 1013, 4),
+            (7, 1025, 1),
+            (7, 1016, 2),
+            (7, 1043, 4),
+            (7, 1034, 5),
+            (8, 1037, 3),
+            (8, 1028, 4),
+            (8, 1046, 2),
+            (9, 1040, 1),
+            (10, 1011, 2),
+            (10, 1002, 3),
+            (11, 1014, 5),
+            (11, 1023, 4),
+            (11, 1005, 1),
+            (12, 1008, 4),
+            (12, 1035, 1),
+            (12, 1017, 3),
+            (12, 1026, 2),
+            (13, 1047, 3),
+            (13, 1038, 4),
+            (13, 1029, 5),
+            (13, 1020, 1),
+            (14, 1041, 2),
+            (14, 1032, 3),
+            (15, 1003, 4),
+            (15, 1044, 5),
+            (16, 1006, 2),
+            (16, 1015, 1),
+        ];
         let mut values: Vec<Equivalence> = input
             .iter()
-            .map(|&(src_offset, dst_offset, length)| Equivalence {
-                src_offset,
-                dst_offset,
-                length,
-            })
+            .map(|&(src_offset, dst_offset, length)| Equivalence { src_offset, dst_offset, length })
             .collect();
         stdcpp::sort_by_src(&mut values);
-        let got: Vec<(u32, u32, u32)> = values
-            .iter()
-            .map(|e| (e.src_offset, e.dst_offset, e.length))
-            .collect();
+        let got: Vec<(u32, u32, u32)> =
+            values.iter().map(|e| (e.src_offset, e.dst_offset, e.length)).collect();
         assert_eq!(got, expected);
     }
 }
-

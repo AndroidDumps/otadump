@@ -158,11 +158,7 @@ impl<'a> Cursor<'a> {
     /// Decodes an `int32_t` zig-zag varint, mirroring `DecodeVarInt`.
     fn var_i32(&mut self) -> Option<i32> {
         let tmp = self.var_u32()?;
-        if tmp & 1 != 0 {
-            Some(!((tmp >> 1) as i32))
-        } else {
-            Some((tmp >> 1) as i32)
-        }
+        if tmp & 1 != 0 { Some(!((tmp >> 1) as i32)) } else { Some((tmp >> 1) as i32) }
     }
 
     /// Mirrors `patch::ParseBuffer`: a `uint32_t` size followed by that many bytes.
@@ -178,12 +174,8 @@ fn invalid_patch(message: &str) -> Error {
 
 fn executable_version(exe_type: u32) -> Option<u16> {
     match exe_type {
-        EXE_TYPE_NOOP
-        | EXE_TYPE_ELF_X86
-        | EXE_TYPE_ELF_X64
-        | EXE_TYPE_ELF_AARCH32
-        | EXE_TYPE_ELF_AARCH64
-        | EXE_TYPE_DEX => Some(1),
+        EXE_TYPE_NOOP | EXE_TYPE_ELF_X86 | EXE_TYPE_ELF_X64 | EXE_TYPE_ELF_AARCH32
+        | EXE_TYPE_ELF_AARCH64 | EXE_TYPE_DEX => Some(1),
         _ => None,
     }
 }
@@ -263,9 +255,7 @@ fn parse_raw_deltas(skip: &[u8], diffs: &[u8]) -> Result<(Vec<RawDeltaUnit>, boo
     let mut diffs = Cursor::new(diffs);
     let mut result = Vec::new();
     let upper = skip.data.len().min(diffs.data.len());
-    result
-        .try_reserve(upper)
-        .map_err(|_| super::allocation_error("Zucchini raw delta stream"))?;
+    result.try_reserve(upper).map_err(|_| super::allocation_error("Zucchini raw delta stream"))?;
     let mut compensation: u32 = 0;
     while !skip.empty() && !diffs.empty() {
         let diff = match skip.var_u32() {
@@ -339,20 +329,14 @@ impl PatchElement {
         let element_match =
             parse_element_match(cursor).ok_or_else(|| invalid_patch("invalid patch element"))?;
 
-        let src_skip = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid equivalence source"))?;
-        let dst_skip = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid equivalence source"))?;
-        let copy_count = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid equivalence source"))?;
-        let (equivalences, equivalences_done) =
-            parse_equivalences(src_skip, dst_skip, copy_count)?;
-        let extra_slice = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid extra data"))?;
+        let src_skip =
+            cursor.buffer().ok_or_else(|| invalid_patch("invalid equivalence source"))?;
+        let dst_skip =
+            cursor.buffer().ok_or_else(|| invalid_patch("invalid equivalence source"))?;
+        let copy_count =
+            cursor.buffer().ok_or_else(|| invalid_patch("invalid equivalence source"))?;
+        let (equivalences, equivalences_done) = parse_equivalences(src_skip, dst_skip, copy_count)?;
+        let extra_slice = cursor.buffer().ok_or_else(|| invalid_patch("invalid extra data"))?;
         let mut extra_data = Vec::new();
         extra_data
             .try_reserve_exact(extra_slice.len())
@@ -388,38 +372,27 @@ impl PatchElement {
             return Err(invalid_patch("incorrect amount of extra data"));
         }
 
-        let raw_skip = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid raw delta source"))?;
-        let raw_diff = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid raw delta source"))?;
+        let raw_skip = cursor.buffer().ok_or_else(|| invalid_patch("invalid raw delta source"))?;
+        let raw_diff = cursor.buffer().ok_or_else(|| invalid_patch("invalid raw delta source"))?;
         let (raw_deltas, raw_deltas_done) = parse_raw_deltas(raw_skip, raw_diff)?;
 
-        let reference_source = cursor
-            .buffer()
-            .ok_or_else(|| invalid_patch("invalid reference delta source"))?;
-        let (reference_deltas, reference_deltas_done) =
-            parse_reference_deltas(reference_source)?;
+        let reference_source =
+            cursor.buffer().ok_or_else(|| invalid_patch("invalid reference delta source"))?;
+        let (reference_deltas, reference_deltas_done) = parse_reference_deltas(reference_source)?;
 
-        let pool_count = cursor
-            .u32()
-            .ok_or_else(|| invalid_patch("invalid extra target list"))?;
+        let pool_count = cursor.u32().ok_or_else(|| invalid_patch("invalid extra target list"))?;
         // Each pool costs at least a tag byte plus a 4-byte length prefix.
         if pool_count as usize > cursor.remaining() / 5 {
             return Err(invalid_patch("invalid extra target list"));
         }
         let mut extra_targets = BTreeMap::new();
         for _ in 0..pool_count {
-            let pool_tag = cursor
-                .u8()
-                .ok_or_else(|| invalid_patch("invalid extra target list"))?;
+            let pool_tag = cursor.u8().ok_or_else(|| invalid_patch("invalid extra target list"))?;
             if pool_tag == 0xFF {
                 return Err(invalid_patch("invalid pool tag"));
             }
-            let source = cursor
-                .buffer()
-                .ok_or_else(|| invalid_patch("invalid extra target list"))?;
+            let source =
+                cursor.buffer().ok_or_else(|| invalid_patch("invalid extra target list"))?;
             if extra_targets.insert(pool_tag, parse_extra_targets(source)?).is_some() {
                 return Err(invalid_patch("duplicate pool tag"));
             }
@@ -454,9 +427,7 @@ impl Patch {
         if header.magic != PATCH_MAGIC || header.major_version != MAJOR_VERSION {
             return Err(invalid_patch("invalid ensemble patch"));
         }
-        let element_count = cursor
-            .u32()
-            .ok_or_else(|| invalid_patch("invalid ensemble patch"))?;
+        let element_count = cursor.u32().ok_or_else(|| invalid_patch("invalid ensemble patch"))?;
         let mut elements = Vec::new();
         // Each element header is 22 bytes, so this bounds the reservation even
         // if `element_count` is absurd.
@@ -467,13 +438,15 @@ impl Patch {
         let mut current_dst_offset: u32 = 0;
         for _ in 0..element_count {
             let element = PatchElement::parse(&mut cursor)?;
-            if !region_fits(element.element_match.old_offset, element.element_match.old_size, header.old_size)
-                || !region_fits(
-                    element.element_match.new_offset,
-                    element.element_match.new_size,
-                    header.new_size,
-                )
-            {
+            if !region_fits(
+                element.element_match.old_offset,
+                element.element_match.old_size,
+                header.old_size,
+            ) || !region_fits(
+                element.element_match.new_offset,
+                element.element_match.new_size,
+                header.new_size,
+            ) {
                 return Err(invalid_patch("invalid patch element"));
             }
             if element.element_match.new_offset != current_dst_offset {

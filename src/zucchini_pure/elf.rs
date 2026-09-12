@@ -7,7 +7,7 @@ use super::bytes::{
     range_is_bounded, read_i32, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
 };
 use super::{
-    Disassembler, GroupTraits, Reference, Result, K_INVALID_OFFSET, K_INVALID_RVA, OFFSET_BOUND,
+    Disassembler, GroupTraits, K_INVALID_OFFSET, K_INVALID_RVA, OFFSET_BOUND, Reference, Result,
 };
 
 const K_RVA_BOUND: u32 = 0x7FFF_FFFF;
@@ -247,11 +247,8 @@ impl AddressTranslator {
             offset_bound = offset_bound.max(unit.offset_end());
             rva_bound = rva_bound.max(unit.rva_end());
         }
-        if !range_is_bounded(
-            u64::from(offset_bound),
-            u64::from(rva_bound),
-            u64::from(K_RVA_BOUND),
-        ) {
+        if !range_is_bounded(u64::from(offset_bound), u64::from(rva_bound), u64::from(K_RVA_BOUND))
+        {
             return false;
         }
 
@@ -576,17 +573,13 @@ impl ElfDisassembler {
         let width = self.kind.va_width();
         let mut gaps = Vec::new();
         gaps.try_reserve(self.abs32_locations.len().saturating_add(1)).ok()?;
-        let mut current = self
-            .abs32_locations
-            .partition_point(|location| *location < region_start);
+        let mut current = self.abs32_locations.partition_point(|location| *location < region_start);
         let mut cur_lo = region_start;
         if current > 0 {
             let previous = self.abs32_locations[current - 1];
             cur_lo = cur_lo.max(previous.saturating_add(width));
         }
-        while current < self.abs32_locations.len()
-            && self.abs32_locations[current] < region_end
-        {
+        while current < self.abs32_locations.len() && self.abs32_locations[current] < region_end {
             let hi = self.abs32_locations[current];
             if hi > cur_lo {
                 gaps.push((cur_lo as usize, hi as usize));
@@ -613,15 +606,16 @@ impl ElfDisassembler {
         let bitness = self.kind.bitness();
         let rel_type = self.kind.rel_type();
 
-        let mut current = self
-            .reloc_sections
-            .partition_point(|section| section.offset <= lo);
+        let mut current = self.reloc_sections.partition_point(|section| section.offset <= lo);
         if current > 0 {
             current -= 1;
         }
         let mut cursor = self.reloc_sections[current].offset;
         if cursor < lo {
-            cursor += align_ceil(u64::from(lo - cursor), u64::from(self.reloc_sections[current].entry_size)) as u32;
+            cursor += align_ceil(
+                u64::from(lo - cursor),
+                u64::from(self.reloc_sections[current].entry_size),
+            ) as u32;
         }
 
         let mut hi = hi;
@@ -667,11 +661,8 @@ impl ElfDisassembler {
                     read_u64(image, cursor as usize + 8).unwrap_or(0),
                 )
             };
-            let rel_type_value = if bitness == 4 {
-                (r_info & 0xFF) as u32
-            } else {
-                (r_info & 0xFFFF_FFFF) as u32
-            };
+            let rel_type_value =
+                if bitness == 4 { (r_info & 0xFF) as u32 } else { (r_info & 0xFFFF_FFFF) as u32 };
             if rel_type_value == rel_type {
                 let valid_r_offset =
                     bitness == 4 || (r_offset as u64 & 0xFFFF_FFFF) == r_offset as u64;
@@ -945,10 +936,7 @@ fn remove_overlapping(width: u32, locations: &mut Vec<u32>) {
 
 /// Parses the ELF header, section table, program table, and derives the
 /// `offset_bound` estimate. Mirrors `DisassemblerElf::ParseHeader`.
-fn parse_elf_header(
-    kind: ElfKind,
-    image: &[u8],
-) -> Option<(Vec<SectionHeader>, u32)> {
+fn parse_elf_header(kind: ElfKind, image: &[u8]) -> Option<(Vec<SectionHeader>, u32)> {
     if u64::from(kind.class()) != 0 {
         // QuickDetect checks.
         if image.len() < 16 || &image[..4] != b"\x7FELF" {
@@ -973,9 +961,23 @@ fn parse_elf_header(
     }
 
     let (e_shoff, e_phoff, e_shnum, e_phnum, e_shstrndx, e_phentsize) = if kind.class() == 2 {
-        (read_u64(image, 40)?, read_u64(image, 32)?, read_u16(image, 60)?, read_u16(image, 56)?, read_u16(image, 62)?, read_u16(image, 54)?)
+        (
+            read_u64(image, 40)?,
+            read_u64(image, 32)?,
+            read_u16(image, 60)?,
+            read_u16(image, 56)?,
+            read_u16(image, 62)?,
+            read_u16(image, 54)?,
+        )
     } else {
-        (u64::from(read_u32(image, 32)?), u64::from(read_u32(image, 28)?), read_u16(image, 48)?, read_u16(image, 44)?, read_u16(image, 50)?, read_u16(image, 42)?)
+        (
+            u64::from(read_u32(image, 32)?),
+            u64::from(read_u32(image, 28)?),
+            read_u16(image, 48)?,
+            read_u16(image, 44)?,
+            read_u16(image, 50)?,
+            read_u16(image, 42)?,
+        )
     };
     if e_phentsize != kind.phdr_size() {
         // Not part of QuickDetect, but the array read would fail anyway.
@@ -1215,13 +1217,7 @@ fn fetch_and_read_a64(
     }
 }
 
-fn write_arm32(
-    image: &mut [u8],
-    addr_type: usize,
-    location: u32,
-    instr_rva: u32,
-    target_rva: u32,
-) {
+fn write_arm32(image: &mut [u8], addr_type: usize, location: u32, instr_rva: u32, target_rva: u32) {
     match addr_type {
         0 => {
             let mut code = arm::fetch_arm_code32(image, location);
