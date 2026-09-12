@@ -3,6 +3,7 @@
 mod chromeos_update_engine {
     include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
 }
+pub mod lz4;
 mod payload;
 mod puffin;
 #[cfg(feature = "python")]

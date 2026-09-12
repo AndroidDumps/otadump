@@ -41,14 +41,24 @@ const ZUCCHINI_SOURCES: &[&str] = &[
     "native/zucchini/vendor/libchrome/base/time/time_now_posix.cc",
 ];
 
+const LZ4_SOURCES: &[&str] = &[
+    "native/lz4/src/lz4_ffi.c",
+    "native/lz4/vendor/lib/lz4.c",
+    "native/lz4/vendor/lib/lz4hc.c",
+    "native/lz4/vendor/lib/xxhash.c",
+];
+
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(otadump_lz4)");
     println!("cargo:rustc-check-cfg=cfg(otadump_zucchini)");
     println!("cargo:rerun-if-changed=src/protos/chromeos_update_engine/update_metadata.proto");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
         && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
     {
+        build_lz4();
         build_zucchini();
+        println!("cargo:rustc-cfg=otadump_lz4");
         println!("cargo:rustc-cfg=otadump_zucchini");
     }
 
@@ -63,14 +73,25 @@ fn main() {
         .expect("error compiling protobuf files");
 }
 
+fn build_lz4() {
+    let root = Path::new("native/lz4");
+    track_directory(root);
+
+    cc::Build::new()
+        .std("c99")
+        .opt_level(3)
+        .define("NDEBUG", None)
+        .warnings(true)
+        .warnings_into_errors(true)
+        .include(root.join("src"))
+        .include(root.join("vendor/lib"))
+        .files(LZ4_SOURCES)
+        .compile("otadump_lz4");
+}
+
 fn build_zucchini() {
     let root = Path::new("native/zucchini");
-    let mut tracked = Vec::new();
-    collect_files(root, &mut tracked);
-    tracked.sort();
-    for path in tracked {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
+    track_directory(root);
 
     let mut build = cc::Build::new();
     build
@@ -100,6 +121,15 @@ fn build_zucchini() {
     add_static_runtime(&compiler, "libstdc++.a", "stdc++");
     add_static_runtime(&compiler, "libgcc.a", "gcc");
     println!("cargo:rustc-link-arg=-static-libgcc");
+}
+
+fn track_directory(root: &Path) {
+    let mut tracked = Vec::new();
+    collect_files(root, &mut tracked);
+    tracked.sort();
+    for path in tracked {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }
 
 fn add_static_runtime(compiler: &cc::Tool, archive: &str, library: &str) {
