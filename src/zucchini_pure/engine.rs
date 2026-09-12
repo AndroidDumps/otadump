@@ -4,8 +4,15 @@
 use std::collections::BTreeMap;
 
 use super::bytes::{range_is_bounded, range_covers};
-use super::patch::{Equivalence, PatchElement};
-use super::{make_disassembler, Disassembler, Error, GroupTraits, Result, Status, K_INVALID_OFFSET, OFFSET_BOUND};
+use super::dex;
+use super::patch::{
+    Equivalence, PatchElement, EXE_TYPE_DEX, EXE_TYPE_ELF_AARCH32, EXE_TYPE_ELF_AARCH64,
+    EXE_TYPE_ELF_X64, EXE_TYPE_ELF_X86, EXE_TYPE_NOOP,
+};
+use super::{
+    is_android_executable, make_disassembler, Disassembler, Error, GroupTraits, Result, Status,
+    K_INVALID_OFFSET, OFFSET_BOUND,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Reference {
@@ -60,6 +67,200 @@ pub(crate) fn apply_element(
     apply_raw_delta(element, new_element)?;
     apply_references_correction(matching.exe_type, old_element, element, new_element)?;
     Ok(())
+}
+
+/// Mirrors the native FFI's `PreflightAndroidElements` for one element: apply
+/// equivalence/extra/raw data to a scratch output, then run the Android
+/// boundary and DEX-target validations that upstream Zucchini does not.
+pub(crate) fn preflight_element(
+    old: &[u8],
+    element: &PatchElement,
+    output: &mut [u8],
+) -> Result<()> {
+    let exe_type = element.element_match.exe_type;
+    if exe_type == EXE_TYPE_NOOP || !is_android_executable(exe_type) {
+        return Ok(());
+    }
+
+    let matching = &element.element_match;
+    let old_end = (matching.old_offset as usize)
+        .checked_add(matching.old_size as usize)
+        .ok_or_else(|| apply_error("old element range overflow"))?;
+    let new_end = (matching.new_offset as usize)
+        .checked_add(matching.new_size as usize)
+        .ok_or_else(|| apply_error("new element range overflow"))?;
+    let old_element = old
+        .get(matching.old_offset as usize..old_end)
+        .ok_or_else(|| apply_error("old element out of bounds"))?;
+    let new_element = output
+        .get_mut(matching.new_offset as usize..new_end)
+        .ok_or_else(|| apply_error("new element out of bounds"))?;
+
+    apply_equivalence_and_extra_data(old_element, element, new_element)?;
+    apply_raw_delta(element, new_element)?;
+
+    let old_disasm = make_disassembler(exe_type, old_element)
+        .ok_or_else(|| apply_error("failed to create old disassembler"))?;
+    let new_disasm = make_disassembler(exe_type, new_element)
+        .ok_or_else(|| apply_error("failed to create new disassembler"))?;
+    if old_disasm.size() != old_element.len() as u32 {
+        return Err(apply_error("disassembler and element size mismatch"));
+    }
+    let new_size = new_element.len() as u32;
+    if !validate_reference_boundaries(&*old_disasm, exe_type, element, old_element, new_size) {
+        return Err(apply_error("reference boundary violation"));
+    }
+    if exe_type == EXE_TYPE_DEX {
+        if !dex::narrow_writer_widths_ok(new_element) {
+            return Err(apply_error("dex writer width violation"));
+        }
+        if !validate_dex_reference_targets(
+            &*old_disasm,
+            &*new_disasm,
+            element,
+            old_element,
+            new_element,
+        ) {
+            return Err(apply_error("dex reference target violation"));
+        }
+    }
+    Ok(())
+}
+
+/// Mirrors the FFI's `ValidateReferenceBoundaries`.
+fn validate_reference_boundaries(
+    old_disasm: &dyn Disassembler,
+    exe_type: u32,
+    element: &PatchElement,
+    old_image: &[u8],
+    new_size: u32,
+) -> bool {
+    let mut boundaries: Vec<u32> = Vec::new();
+    for equivalence in &element.equivalences {
+        boundaries.push(equivalence.src_offset);
+        boundaries.push(equivalence.src_end());
+    }
+    boundaries.sort_unstable();
+
+    let old_size = old_image.len() as u32;
+    for (group_index, group) in old_disasm.groups().iter().enumerate() {
+        let mut writer_width = group.width;
+        if group.type_tag == 0 {
+            match exe_type {
+                EXE_TYPE_ELF_X86 | EXE_TYPE_ELF_AARCH32 => writer_width = 8,
+                EXE_TYPE_ELF_X64 | EXE_TYPE_ELF_AARCH64 => writer_width = 16,
+                _ => {}
+            }
+        }
+
+        for reference in old_disasm.read(group_index, old_image, 0, old_size) {
+            let boundary = boundaries.partition_point(|value| *value <= reference.location);
+            if boundary < boundaries.len()
+                && boundaries[boundary] < reference.location.wrapping_add(group.width)
+            {
+                return false;
+            }
+        }
+
+        for equivalence in &element.equivalences {
+            for reference in old_disasm.read(
+                group_index,
+                old_image,
+                equivalence.src_offset,
+                equivalence.src_end(),
+            ) {
+                if reference.location < equivalence.src_offset
+                    || reference.location > equivalence.src_end()
+                    || group.width > equivalence.src_end() - reference.location
+                {
+                    return false;
+                }
+                let projected = equivalence.dst_offset.wrapping_add(
+                    reference.location.wrapping_sub(equivalence.src_offset),
+                );
+                if projected > new_size || writer_width > new_size - projected {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Mirrors the FFI's `ValidateDexReferenceTargets`.
+fn validate_dex_reference_targets(
+    old_disasm: &dyn Disassembler,
+    new_disasm: &dyn Disassembler,
+    element: &PatchElement,
+    old_image: &[u8],
+    new_image: &[u8],
+) -> bool {
+    let Some(string_ids) = dex::string_ids(new_image) else { return false };
+
+    let mut pools: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    for (index, group) in old_disasm.groups().iter().enumerate() {
+        pools.entry(group.pool_tag).or_default().push(index);
+    }
+
+    let mut deltas = element.reference_deltas.iter();
+    let old_size = old_image.len() as u32;
+    let mapper = OffsetMapper::new(
+        &element.equivalences,
+        old_size,
+        new_image.len() as u32,
+    );
+
+    for (pool_tag, sub_groups) in &pools {
+        let mut targets = TargetPool::default();
+        for &group_index in sub_groups {
+            targets.insert_references(&old_disasm.read(group_index, old_image, 0, old_size));
+        }
+        targets.filter_and_project(&mapper);
+        if let Some(extra) = element.extra_targets.get(pool_tag) {
+            targets.insert_targets(&extra.targets);
+            if !extra.done {
+                return false;
+            }
+        }
+
+        for &group_index in sub_groups {
+            let type_tag = old_disasm.groups()[group_index].type_tag;
+            if usize::from(type_tag) >= new_disasm.groups().len() {
+                return false;
+            }
+            for equivalence in &element.equivalences {
+                for reference in old_disasm.read(
+                    group_index,
+                    old_image,
+                    equivalence.src_offset,
+                    equivalence.src_end(),
+                ) {
+                    let projected = mapper.extended_forward_project(reference.target);
+                    let expected = targets.key_for_nearest_offset(projected);
+                    let Some(delta) = deltas.next() else { return false };
+                    let key = i64::from(expected) + i64::from(*delta);
+                    if !(0..=i64::from(u32::MAX)).contains(&key) {
+                        return false;
+                    }
+                    let key = key as u32;
+                    if !targets.key_is_valid(key) {
+                        return false;
+                    }
+                    if type_tag == 5 {
+                        let target = targets.offset_for_key(key);
+                        if target < string_ids.offset
+                            || (target - string_ids.offset) % 4 != 0
+                            || (target - string_ids.offset) / 4 > u32::from(u16::MAX)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    deltas.next().is_none() && element.reference_deltas_done
 }
 
 /// Mirrors `ApplyEquivalenceAndExtraData`.

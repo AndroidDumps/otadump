@@ -138,6 +138,14 @@ pub fn apply(old: &[u8], patch_bytes: &[u8], output_size: usize) -> Result<Vec<u
     })?;
     output.resize(output_size, 0);
 
+    // Android hardens upstream apply with an additional preflight. Mirror the
+    // native FFI so unsafe patches are rejected before publication.
+    for element in &patch.elements {
+        engine::preflight_element(old, element, &mut output).map_err(|_| {
+            Error::new(Status::ApplyError, "android executable preflight failed")
+        })?;
+    }
+
     for element in &patch.elements {
         engine::apply_element(old, element, &mut output)?;
     }
@@ -148,7 +156,7 @@ pub fn apply(old: &[u8], patch_bytes: &[u8], output_size: usize) -> Result<Vec<u
     Ok(output)
 }
 
-fn is_android_executable(exe_type: u32) -> bool {
+pub(crate) fn is_android_executable(exe_type: u32) -> bool {
     matches!(
         exe_type,
         patch::EXE_TYPE_ELF_X86

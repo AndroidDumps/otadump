@@ -47,6 +47,19 @@ fn pure_rust_rejects_wrong_output_size() {
     assert_eq!(error.status(), Status::WrongOutputSize);
 }
 
+/// Mirrors the native test for `dex-large-unsafe16.zuc`: the Android preflight
+/// must reject the unsafe 16-bit string reference before publication.
+#[test]
+fn pure_rust_rejects_unsafe_large_dex_string16_reference() {
+    let fixtures = Path::new(FIXTURES);
+    let old = fs::read(fixtures.join("dex-large-old.dex")).unwrap();
+    let patch = fs::read(fixtures.join("dex-large-unsafe16.zuc")).unwrap();
+    let expected_size = fs::metadata(fixtures.join("dex-large-new.dex")).unwrap().len() as usize;
+    let error = zucchini_pure::apply(&old, &patch, expected_size).unwrap_err();
+    assert_eq!(error.status(), Status::ApplyError);
+    assert_eq!(error.to_string(), "android executable preflight failed");
+}
+
 #[test]
 fn pure_rust_rejects_truncated_patch() {
     let fixtures = Path::new(FIXTURES);

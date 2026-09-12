@@ -29,9 +29,9 @@ const T_CODE_ITEM: u16 = 0x2001;
 const T_ANNOTATIONS_DIRECTORY: u16 = 0x2006;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct MapItem {
-    size: u32,
-    offset: u32,
+pub(crate) struct MapItem {
+    pub(crate) size: u32,
+    pub(crate) offset: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -280,6 +280,55 @@ fn read_dex_header(image: &[u8]) -> Option<(u32, u32)> {
         return None;
     }
     Some((file_size, map_off))
+}
+
+/// Reads the map item of `desired` type from a (possibly patched) DEX image.
+/// Mirrors the FFI's `ReadDexMapItem` helper.
+pub(crate) fn read_map_item(image: &[u8], desired: u16) -> Option<MapItem> {
+    let (_, map_off) = read_dex_header(image)?;
+    let list_start = map_off as usize;
+    let count = read_u32(image, list_start)?;
+    let items_start = list_start.checked_add(4)?;
+    let items_end = items_start.checked_add(count as usize * MAP_ITEM_SIZE)?;
+    if items_end > image.len() {
+        return None;
+    }
+    for index in 0..count as usize {
+        let base = items_start + index * MAP_ITEM_SIZE;
+        if read_u16(image, base)? == desired {
+            return Some(MapItem {
+                size: read_u32(image, base + 4)?,
+                offset: read_u32(image, base + 8)?,
+            });
+        }
+    }
+    None
+}
+
+/// Mirrors the FFI's `ValidateDexWriterWidths`: the narrow fixed-size lists must
+/// fit a 16-bit writer.
+pub(crate) fn narrow_writer_widths_ok(image: &[u8]) -> bool {
+    const NARROW_TYPES: [u16; 6] = [
+        T_TYPE_ID,
+        T_PROTO_ID,
+        T_FIELD_ID,
+        T_METHOD_ID,
+        T_CALL_SITE_ID,
+        T_METHOD_HANDLE,
+    ];
+    for kind in NARROW_TYPES {
+        if let Some(item) = read_map_item(image, kind) {
+            if item.size > u32::from(u16::MAX) + 1 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Returns the `string_ids` list bounds from a patched DEX image.
+pub(crate) fn string_ids(image: &[u8]) -> Option<MapItem> {
+    read_map_item(image, T_STRING_ID)
 }
 
 fn parse_item_offsets(

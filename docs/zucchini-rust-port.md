@@ -26,6 +26,7 @@ This port reimplements the apply path in safe Rust under
 | ELF parse, address translation, reloc/abs32, Intel + ARM rel32 finders | `disassembler_elf.cc`, `address_translator.cc`, `reloc_elf.cc`, `abs32_utils.cc`, `rel32_utils.cc`, `rel32_finder.cc` | `elf.rs` |
 | AArch32/AArch64 and THUMB2 instruction codecs | `arm_utils.cc` | `arm.rs` |
 | DEX header/map/code-item/item-list parsing and all 42 reference groups | `disassembler_dex.cc`, `type_dex.h` | `dex.rs` |
+| Android preflight hardening | `native/zucchini/src/zucchini_ffi.cc` | `engine.rs` |
 | Little-endian helpers and bit fields | `buffer_view.h`, `algorithm.h` | `bytes.rs` |
 
 The `Disassembler` trait in `mod.rs` is the only abstraction the engine needs:
@@ -42,8 +43,10 @@ DEX implement it; `make_disassembler` rejects non-Android formats
 - `dex.zuc`, `dex-large.zuc` (65,537 strings, 16-bit and 32-bit code refs)
 
 Negative cases check that garbage and truncated patches return
-`Status::InvalidPatch` and a mismatched output size returns
-`Status::WrongOutputSize`.
+`Status::InvalidPatch`, a mismatched output size returns
+`Status::WrongOutputSize`, and `dex-large-unsafe16.zuc` is rejected by the
+ported Android preflight with `"android executable preflight failed"`,
+matching the native test exactly.
 
 Run with:
 
@@ -61,37 +64,25 @@ The fixtures exercise only a subset of each format's reference types (for
 example `elf-x86`/`elf` only hit rel32, `elf-arm32` only A24, `elf-arm64` only
 Immd26). Passing them is necessary but not sufficient. This port implements
 every reference type the native disassemblers emit, so it is deliberately
-broader than the fixtures.
+broader than the fixtures. The committed `dex-large-unsafe16.zuc` fixture
+exercises the Android-only preflight path end to end.
 
 ## Blockers and the smallest C++ boundary
 
-A complete apply rewrite is realistic. The remaining gaps are small and
-well-delimited:
+A complete pure-Rust apply rewrite is realized for Android element formats. The
+remaining work is engineering hardening and wiring, not missing format support:
 
-1. **Android preflight hardening (the only real semantic gap).**
-   `native/zucchini/src/zucchini_ffi.cc` layers three validations on top of
-   upstream `ApplyBuffer` that upstream Zucchini does not have:
-   - `ValidateReferenceBoundaries` — no reference/writer body may straddle an
-     equivalence boundary.
-   - `ValidateDexWriterWidths` — `type_id`/`proto_id`/`field_id`/`method_id`/
-     `call_site_id`/`method_handle` lists must fit a 16-bit writer.
-   - `ValidateDexReferenceTargets` — 16-bit `const-string` references must
-     resolve to string ids that fit in 16 bits.
-   These reject otherwise byte-valid patches (the `dex-large-unsafe16.zuc`
-   fixture). The pure port currently surfaces that case as a new-image CRC
-   mismatch (`ApplyError`), not as `"android executable preflight failed"`.
-   This is Android policy, not format math, so it must be ported deliberately
-   with dedicated tests.
+1. **Android preflight hardening — ported.** The native FFI's extra validations
+   (`ValidateReferenceBoundaries`, `ValidateDexWriterWidths`,
+   `ValidateDexReferenceTargets`) now live in the Rust engine and run before the
+   apply pass, reproducing the native `"android executable preflight failed"`
+   rejection.
 
-2. **Smallest C++ boundary.** Because the three validators above call the
-   vendored C++ disassemblers, *keeping any of them in C++ keeps the entire
-   zucchini + libchrome stack*. There is no useful smaller C++ subset. The two
-   coherent options are therefore:
-   - *Strict native parity now*: keep the existing C++ boundary unchanged.
-   - *Pure-Rust target*: port the three validators (≈250–350 lines) on top of
-     the existing Rust readers/writers. After that the C++ boundary for
-     apply-only builds is **zero** — `build.rs`, `native/`, `libchrome`, and
-     the `cc` build dependency can be removed for the apply path.
+2. **Smallest C++ boundary: zero for apply-only builds.** With the preflight
+   ported, nothing on the apply path needs C++. The `native/` tree, vendored
+   libchrome, `cc` build dependency, and the `otadump_zucchini` cfg can be
+   removed for apply-only builds. The remaining C++ is only useful if patch
+   *generation* is ever added.
 
 3. **Non-Android formats (Win32, ZTF).** Not emitted by Android payloads and
    intentionally rejected. Porting them would only matter for non-Android use.
@@ -105,7 +96,7 @@ well-delimited:
 5. **Wiring.** `zucchini_pure` is exposed alongside `zucchini::apply` rather
    than replacing it, so the native path and tests remain intact. The final
    step is to route `zucchini::apply` to the pure implementation and drop the
-   `otadump_zucchini` cfg/build once items 1 and 4 are addressed.
+   `otadump_zucchini` cfg/build once item 4 is addressed.
 
 ## Reproducing the measurement
 
