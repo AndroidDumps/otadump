@@ -6,7 +6,9 @@ use super::bytes::{
     align_ceil, increment_for_align_ceil2, increment_for_align_ceil4, range_covers,
     range_is_bounded, read_i32, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64,
 };
-use super::{Disassembler, GroupTraits, Reference, K_INVALID_OFFSET, K_INVALID_RVA, OFFSET_BOUND};
+use super::{
+    Disassembler, GroupTraits, Reference, Result, K_INVALID_OFFSET, K_INVALID_RVA, OFFSET_BOUND,
+};
 
 const K_RVA_BOUND: u32 = 0x7FFF_FFFF;
 const K_SIZE_BOUND: u64 = 0x7FFF_0000;
@@ -767,14 +769,14 @@ impl Disassembler for ElfDisassembler {
         &self.groups
     }
 
-    fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Vec<Reference> {
+    fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>> {
         if group == 0 {
-            return self.read_relocs(image, lo, hi);
+            return Ok(self.read_relocs(image, lo, hi));
         }
         if group == 1 {
-            return self.read_abs32(image, lo, hi);
+            return Ok(self.read_abs32(image, lo, hi));
         }
-        match self.kind {
+        Ok(match self.kind {
             ElfKind::X86 | ElfKind::X64 => self.read_rel32_intel(image, lo, hi),
             ElfKind::AArch32 | ElfKind::AArch64 => {
                 // Group index == address type index + 2 for ARM.
@@ -785,7 +787,7 @@ impl Disassembler for ElfDisassembler {
                     Vec::new()
                 }
             }
-        }
+        })
     }
 
     fn write(&self, group: usize, image: &mut [u8], reference: Reference) {

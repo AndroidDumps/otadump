@@ -480,3 +480,27 @@ pub fn check_new_file(header: &PatchHeader, new_image: &[u8]) -> bool {
     new_image.len() == header.new_size as usize
         && super::crc32::calculate_crc32(new_image) == header.new_crc
 }
+
+/// Cancellable variant of [`check_old_file`].
+pub(crate) fn check_old_file_cancel(
+    header: &PatchHeader,
+    old_image: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<bool> {
+    if old_image.len() != header.old_size as usize {
+        return Ok(false);
+    }
+    Ok(super::crc32::calculate_crc32_cancel(old_image, cancelled)? == header.old_crc)
+}
+
+/// Cancellable variant of [`check_new_file`].
+pub(crate) fn check_new_file_cancel(
+    header: &PatchHeader,
+    new_image: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<bool> {
+    if new_image.len() != header.new_size as usize {
+        return Ok(false);
+    }
+    Ok(super::crc32::calculate_crc32_cancel(new_image, cancelled)? == header.new_crc)
+}

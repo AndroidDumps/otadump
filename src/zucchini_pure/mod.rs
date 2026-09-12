@@ -97,7 +97,10 @@ pub trait Disassembler {
     fn groups(&self) -> &[GroupTraits];
 
     /// Emits references of `group` whose bodies lie in `[lo, hi)`.
-    fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Vec<Reference>;
+    ///
+    /// Fallible so that reference vectors derived from attacker-controlled
+    /// counts can fail with `Status::AllocationFailure` instead of aborting.
+    fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>>;
 
     /// Writes a single corrected reference into the new image.
     fn write(&self, group: usize, image: &mut [u8], reference: Reference);
@@ -172,13 +175,18 @@ fn apply_inner(
     // native FFI so unsafe patches are rejected before publication. The native
     // `PreflightAndroidElements` performs the old-file check here too, hence the
     // preflight-specific message.
-    if !patch::check_old_file(&patch.header, old) {
+    if !patch::check_old_file_cancel(&patch.header, old, cancelled)? {
         return Err(Error::new(Status::ApplyError, "android executable preflight failed"));
     }
     for element in &patch.elements {
         check()?;
-        engine::preflight_element(old, element, &mut output, cancelled).map_err(|_| {
-            Error::new(Status::ApplyError, "android executable preflight failed")
+        engine::preflight_element(old, element, &mut output, cancelled).map_err(|error| {
+            // Preserve cooperative cancellation; everything else is a
+            // preflight validation failure.
+            match error.status() {
+                Status::Cancelled => error,
+                _ => Error::new(Status::ApplyError, "android executable preflight failed"),
+            }
         })?;
     }
 
@@ -187,7 +195,7 @@ fn apply_inner(
         engine::apply_element(old, element, &mut output, cancelled)?;
     }
 
-    if !patch::check_new_file(&patch.header, &output) {
+    if !patch::check_new_file_cancel(&patch.header, &output, cancelled)? {
         return Err(Error::new(Status::ApplyError, "zucchini apply failed"));
     }
     Ok(output)

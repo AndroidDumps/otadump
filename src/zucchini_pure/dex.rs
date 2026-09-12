@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::bytes::{align_ceil, read_i16, read_i32, read_i8, read_u16, read_u32, write_u16, write_u32};
-use super::{Disassembler, GroupTraits, Reference, K_INVALID_OFFSET, OFFSET_BOUND};
+use super::{Disassembler, GroupTraits, Reference, Result, K_INVALID_OFFSET, OFFSET_BOUND};
 
 const HEADER_SIZE: usize = 112;
 const CODE_ITEM_HEADER: usize = 16;
@@ -984,7 +984,7 @@ impl Disassembler for DexDisassembler {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Vec<Reference> {
+    fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>> {
         // The index field width equals the group's declared reference width for
         // every index-based mapper (e.g. annotations-directory ids are 32-bit),
         // so derive it instead of hardcoding per group.
@@ -1000,7 +1000,7 @@ impl Disassembler for DexDisassembler {
             width,
         };
         let proto_index = ItemMapper::TargetIndex { map: self.proto_map, item_size: 12, width };
-        match group {
+        Ok(match group {
             0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(width), false),
             1 => item_reader(image, lo, hi, self.proto_map, 12, 0, string_index(width), false),
             2 => item_reader(image, lo, hi, self.field_map, 8, 4, string_index(width), false),
@@ -1264,7 +1264,7 @@ impl Disassembler for DexDisassembler {
                 false,
             ),
             _ => Vec::new(),
-        }
+        })
     }
 
     fn write(&self, group: usize, image: &mut [u8], reference: Reference) {

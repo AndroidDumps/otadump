@@ -211,3 +211,69 @@ fn native_and_pure_agree_on_all_fixtures() {
         }
     }
 }
+
+/// Cancellation occurring while the Android preflight is running must surface
+/// as `Status::Cancelled`, not be folded into the preflight `ApplyError`.
+#[test]
+fn pure_rust_preserves_cancellation_through_preflight() {
+    use std::cell::Cell;
+
+    let fixtures = Path::new(FIXTURES);
+    for (old_name, patch_name, new_name) in
+        [("elf-old", "elf.zuc", "elf-new"), ("dex-old.dex", "dex.zuc", "dex-new.dex")]
+    {
+        let old = fs::read(fixtures.join(old_name)).unwrap();
+        let patch = fs::read(fixtures.join(patch_name)).unwrap();
+        let size = fs::metadata(fixtures.join(new_name)).unwrap().len() as usize;
+
+        // Every early poll site (CRC chunks, per-element, per-group, per
+        // equivalence, and DEX target validation) must preserve Cancelled.
+        for threshold in 1..=20u32 {
+            let calls = Cell::new(0u32);
+            let error = zucchini_pure::apply_with_cancel(&old, &patch, size, || {
+                calls.set(calls.get() + 1);
+                calls.get() >= threshold
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.status(),
+                Status::Cancelled,
+                "{patch_name} threshold {threshold} lost cancellation: {error}"
+            );
+        }
+    }
+}
+
+/// A declared stream length larger than the patch must be rejected during
+/// parsing without attempting the allocation.
+#[test]
+fn pure_rust_rejects_absurd_declared_stream_length() {
+    let old = b"ABCD";
+    let new = b"ABCDE";
+    let mut patch = Vec::new();
+    patch.extend_from_slice(b"Zucc");
+    patch.extend_from_slice(&1u16.to_le_bytes());
+    patch.extend_from_slice(&0u16.to_le_bytes());
+    patch.extend_from_slice(&(old.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&crc32(old).to_le_bytes());
+    patch.extend_from_slice(&(new.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&crc32(new).to_le_bytes());
+    patch.extend_from_slice(&1u32.to_le_bytes());
+
+    patch.extend_from_slice(&0u32.to_le_bytes());
+    patch.extend_from_slice(&(old.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&0u32.to_le_bytes());
+    patch.extend_from_slice(&(new.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&u32::from_le_bytes(*b"NoOp").to_le_bytes());
+    patch.extend_from_slice(&1u16.to_le_bytes());
+
+    patch.extend_from_slice(&1u32.to_le_bytes());
+    patch.push(0); // src_skip
+    patch.extend_from_slice(&1u32.to_le_bytes());
+    patch.push(0); // dst_skip
+    // copy_count claims 4 GiB while the patch ends here.
+    patch.extend_from_slice(&u32::MAX.to_le_bytes());
+
+    let error = zucchini_pure::apply(old, &patch, new.len()).unwrap_err();
+    assert_eq!(error.status(), Status::InvalidPatch);
+}

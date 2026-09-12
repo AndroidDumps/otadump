@@ -990,8 +990,22 @@ impl Task<'_> {
         self.cancellation_token.check()?;
         let patch = decode_zucchini_patch(compressed_patch, self.cancellation_token)?;
         self.cancellation_token.check()?;
-        let output = zucchini::apply(&source, &patch, expected_output_len)
-            .map_err(|error| anyhow::anyhow!("ZUCCHINI apply failed: {error}"))?;
+        let output = zucchini::apply_with_cancel(
+            &source,
+            &patch,
+            expected_output_len,
+            || self.cancellation_token.is_cancelled(),
+        )
+        .map_err(|error| {
+            // Preserve cooperative cancellation as a typed error so the
+            // extraction layer can unwind cleanly; anything else is a patch
+            // failure.
+            if error.status() == zucchini::Status::Cancelled {
+                anyhow::Error::new(ExtractionCancelled)
+            } else {
+                anyhow::anyhow!("ZUCCHINI apply failed: {error}")
+            }
+        })?;
         self.cancellation_token.check()?;
         self.write_exact(&output, dst_extents)
     }

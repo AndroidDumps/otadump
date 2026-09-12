@@ -33,8 +33,8 @@ impl Disassembler for NoOpDisassembler {
         &[]
     }
 
-    fn read(&self, _group: usize, _image: &[u8], _lo: u32, _hi: u32) -> Vec<Reference> {
-        Vec::new()
+    fn read(&self, _group: usize, _image: &[u8], _lo: u32, _hi: u32) -> Result<Vec<Reference>> {
+        Ok(Vec::new())
     }
 
     fn write(&self, _group: usize, _image: &mut [u8], _reference: Reference) {}
@@ -74,7 +74,7 @@ pub(crate) fn apply_element(
         .ok_or_else(|| apply_error("new element out of bounds"))?;
 
     apply_equivalence_and_extra_data(old_element, element, new_element, cancelled)?;
-    apply_raw_delta(element, new_element)?;
+    apply_raw_delta(element, new_element, cancelled)?;
     apply_references_correction(matching.exe_type, old_element, element, new_element, cancelled)?;
     Ok(())
 }
@@ -109,7 +109,7 @@ pub(crate) fn preflight_element(
         .ok_or_else(|| apply_error("new element out of bounds"))?;
 
     apply_equivalence_and_extra_data(old_element, element, new_element, cancelled)?;
-    apply_raw_delta(element, new_element)?;
+    apply_raw_delta(element, new_element, cancelled)?;
 
     let old_disasm = make_disassembler(exe_type, old_element)
         .ok_or_else(|| apply_error("failed to create old disassembler"))?;
@@ -121,7 +121,14 @@ pub(crate) fn preflight_element(
         return Err(apply_error("disassembler and element size mismatch"));
     }
     let new_size = new_element.len() as u32;
-    if !validate_reference_boundaries(&*old_disasm, exe_type, element, old_element, new_size) {
+    if !validate_reference_boundaries(
+        &*old_disasm,
+        exe_type,
+        element,
+        old_element,
+        new_size,
+        cancelled,
+    )? {
         return Err(apply_error("reference boundary violation"));
     }
     if exe_type == EXE_TYPE_DEX {
@@ -134,21 +141,25 @@ pub(crate) fn preflight_element(
             element,
             old_element,
             new_element,
-        ) {
+            cancelled,
+        )? {
             return Err(apply_error("dex reference target violation"));
         }
     }
     Ok(())
 }
 
-/// Mirrors the FFI's `ValidateReferenceBoundaries`.
+/// Mirrors the FFI's `ValidateReferenceBoundaries`. Returns `Ok(true)` when the
+/// element is safe, `Ok(false)` on a boundary violation, and `Err(Cancelled)`
+/// if the caller cancels.
 fn validate_reference_boundaries(
     old_disasm: &dyn Disassembler,
     exe_type: u32,
     element: &PatchElement,
     old_image: &[u8],
     new_size: u32,
-) -> bool {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<bool> {
     let mut boundaries: Vec<u32> = Vec::new();
     for equivalence in &element.equivalences {
         boundaries.push(equivalence.src_offset);
@@ -158,6 +169,7 @@ fn validate_reference_boundaries(
 
     let old_size = old_image.len() as u32;
     for (group_index, group) in old_disasm.groups().iter().enumerate() {
+        check_not_cancelled(cancelled)?;
         let mut writer_width = group.width;
         if group.type_tag == 0 {
             match exe_type {
@@ -167,49 +179,52 @@ fn validate_reference_boundaries(
             }
         }
 
-        for reference in old_disasm.read(group_index, old_image, 0, old_size) {
+        for reference in old_disasm.read(group_index, old_image, 0, old_size)? {
             let boundary = boundaries.partition_point(|value| *value <= reference.location);
             if boundary < boundaries.len()
                 && boundaries[boundary] < reference.location.wrapping_add(group.width)
             {
-                return false;
+                return Ok(false);
             }
         }
 
         for equivalence in &element.equivalences {
+            check_not_cancelled(cancelled)?;
             for reference in old_disasm.read(
                 group_index,
                 old_image,
                 equivalence.src_offset,
                 equivalence.src_end(),
-            ) {
+            )? {
                 if reference.location < equivalence.src_offset
                     || reference.location > equivalence.src_end()
                     || group.width > equivalence.src_end() - reference.location
                 {
-                    return false;
+                    return Ok(false);
                 }
                 let projected = equivalence.dst_offset.wrapping_add(
                     reference.location.wrapping_sub(equivalence.src_offset),
                 );
                 if projected > new_size || writer_width > new_size - projected {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
     }
-    true
+    Ok(true)
 }
 
-/// Mirrors the FFI's `ValidateDexReferenceTargets`.
+/// Mirrors the FFI's `ValidateDexReferenceTargets`. Returns `Ok(true)` when the
+/// targets are safe, `Ok(false)` on violation, and `Err(Cancelled)` otherwise.
 fn validate_dex_reference_targets(
     old_disasm: &dyn Disassembler,
     new_disasm: &dyn Disassembler,
     element: &PatchElement,
     old_image: &[u8],
     new_image: &[u8],
-) -> bool {
-    let Some(string_ids) = dex::string_ids(new_image) else { return false };
+    cancelled: &dyn Fn() -> bool,
+) -> Result<bool> {
+    let Some(string_ids) = dex::string_ids(new_image) else { return Ok(false) };
 
     let mut pools: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
     for (index, group) in old_disasm.groups().iter().enumerate() {
@@ -225,40 +240,42 @@ fn validate_dex_reference_targets(
     );
 
     for (pool_tag, sub_groups) in &pools {
+        check_not_cancelled(cancelled)?;
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
-            targets.insert_references(&old_disasm.read(group_index, old_image, 0, old_size));
+            targets.insert_references(&old_disasm.read(group_index, old_image, 0, old_size)?);
         }
         targets.filter_and_project(&mapper);
         if let Some(extra) = element.extra_targets.get(pool_tag) {
             targets.insert_targets(&extra.targets);
             if !extra.done {
-                return false;
+                return Ok(false);
             }
         }
 
         for &group_index in sub_groups {
             let type_tag = old_disasm.groups()[group_index].type_tag;
             if usize::from(type_tag) >= new_disasm.groups().len() {
-                return false;
+                return Ok(false);
             }
             for equivalence in &element.equivalences {
+                check_not_cancelled(cancelled)?;
                 for reference in old_disasm.read(
                     group_index,
                     old_image,
                     equivalence.src_offset,
                     equivalence.src_end(),
-                ) {
+                )? {
                     let projected = mapper.extended_forward_project(reference.target);
                     let expected = targets.key_for_nearest_offset(projected);
-                    let Some(delta) = deltas.next() else { return false };
+                    let Some(delta) = deltas.next() else { return Ok(false) };
                     let key = i64::from(expected) + i64::from(*delta);
                     if !(0..=i64::from(u32::MAX)).contains(&key) {
-                        return false;
+                        return Ok(false);
                     }
                     let key = key as u32;
                     if !targets.key_is_valid(key) {
-                        return false;
+                        return Ok(false);
                     }
                     if type_tag == 5 {
                         let target = targets.offset_for_key(key);
@@ -266,7 +283,7 @@ fn validate_dex_reference_targets(
                             || (target - string_ids.offset) % 4 != 0
                             || (target - string_ids.offset) / 4 > u32::from(u16::MAX)
                         {
-                            return false;
+                            return Ok(false);
                         }
                     }
                 }
@@ -274,7 +291,7 @@ fn validate_dex_reference_targets(
         }
     }
 
-    deltas.next().is_none() && element.reference_deltas_done
+    Ok(deltas.next().is_none() && element.reference_deltas_done)
 }
 
 /// Mirrors `ApplyEquivalenceAndExtraData`.
@@ -343,11 +360,16 @@ fn take_extra<'a>(extra: &'a [u8], cursor: &mut usize, size: usize) -> Result<&'
 }
 
 /// Mirrors `ApplyRawDelta`.
-fn apply_raw_delta(element: &PatchElement, new_image: &mut [u8]) -> Result<()> {
+fn apply_raw_delta(
+    element: &PatchElement,
+    new_image: &mut [u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
     let mut base_copy_offset: u32 = 0;
     let mut equivalence_index = 0usize;
 
     for delta in &element.raw_deltas {
+        check_not_cancelled(cancelled)?;
         while equivalence_index < element.equivalences.len() {
             let equivalence = element.equivalences[equivalence_index];
             let end = base_copy_offset
@@ -424,7 +446,7 @@ fn apply_references_correction(
         check_not_cancelled(cancelled)?;
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
-            let references = old_disasm.read(group_index, old_image, 0, old_image.len() as u32);
+            let references = old_disasm.read(group_index, old_image, 0, old_image.len() as u32)?;
             targets.insert_references(&references);
         }
         targets.filter_and_project(&mapper);
@@ -448,8 +470,9 @@ fn apply_references_correction(
                     old_image,
                     equivalence.src_offset,
                     equivalence.src_end(),
-                );
+                )?;
                 for mut reference in references {
+                    check_not_cancelled(cancelled)?;
                     let projected = mapper.extended_forward_project(reference.target);
                     let expected_key = targets.key_for_nearest_offset(projected);
                     let delta = deltas

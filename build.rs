@@ -64,9 +64,9 @@ fn main() {
 
     // Zucchini is implemented in pure Rust (`src/zucchini_pure`). The vendored
     // C++/libchrome implementation is retained only for differential testing,
-    // enabled explicitly with `OTADUMP_NATIVE_ZUCCHINI=1`.
+    // enabled explicitly with `OTADUMP_NATIVE_ZUCCHINI=1` (exact value only).
     println!("cargo:rustc-cfg=otadump_zucchini");
-    if std::env::var_os("OTADUMP_NATIVE_ZUCCHINI").is_some() {
+    if std::env::var("OTADUMP_NATIVE_ZUCCHINI").as_deref() == Ok("1") {
         build_zucchini();
         println!("cargo:rustc-cfg=otadump_native_zucchini");
     }
