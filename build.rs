@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Upstream Zucchini apply-only closure.
 const ZUCCHINI_SOURCES: &[&str] = &[
     "native/zucchini/src/zucchini_ffi.cc",
     "native/zucchini/vendor/zucchini/abs32_utils.cc",
@@ -20,32 +21,20 @@ const ZUCCHINI_SOURCES: &[&str] = &[
     "native/zucchini/vendor/zucchini/reloc_elf.cc",
     "native/zucchini/vendor/zucchini/target_pool.cc",
     "native/zucchini/vendor/zucchini/zucchini_apply.cc",
-    "native/zucchini/vendor/libchrome/base/at_exit.cc",
+    // Minimal libchrome runtime: the only upstream TUs still referenced after
+    // the dead debug/metrics/activity-tracking closure was removed, plus a shim
+    // replacing logging.cc + base/debug/*.
     "native/zucchini/vendor/libchrome/base/callback_internal.cc",
-    "native/zucchini/vendor/libchrome/base/debug/activity_tracker.cc",
-    "native/zucchini/vendor/libchrome/base/debug/alias.cc",
-    "native/zucchini/vendor/libchrome/base/debug/debugger_posix.cc",
-    "native/zucchini/vendor/libchrome/base/debug/stack_trace.cc",
-    "native/zucchini/vendor/libchrome/base/debug/stack_trace_posix.cc",
-    "native/zucchini/vendor/libchrome/base/lazy_instance_helpers.cc",
-    "native/zucchini/vendor/libchrome/base/location.cc",
-    "native/zucchini/vendor/libchrome/base/logging.cc",
-    "native/zucchini/vendor/libchrome/base/metrics/persistent_memory_allocator.cc",
-    "native/zucchini/vendor/libchrome/base/strings/string_piece.cc",
     "native/zucchini/vendor/libchrome/base/strings/stringprintf.cc",
-    "native/zucchini/vendor/libchrome/base/strings/string_util.cc",
-    "native/zucchini/vendor/libchrome/base/synchronization/lock_impl_posix.cc",
-    "native/zucchini/vendor/libchrome/base/threading/platform_thread_posix.cc",
-    "native/zucchini/vendor/libchrome/base/threading/thread_local_storage.cc",
-    "native/zucchini/vendor/libchrome/base/time/time.cc",
-    "native/zucchini/vendor/libchrome/base/time/time_now_posix.cc",
+    "native/zucchini/src/libchrome_shim.cc",
 ];
 
+// LZ4 block codec only. xxhash.c serves lz4frame.c (not built) and is
+// referenced by neither lz4.c nor lz4hc.c.
 const LZ4_SOURCES: &[&str] = &[
     "native/lz4/src/lz4_ffi.c",
     "native/lz4/vendor/lib/lz4.c",
     "native/lz4/vendor/lib/lz4hc.c",
-    "native/lz4/vendor/lib/xxhash.c",
 ];
 
 fn main() {
@@ -92,6 +81,10 @@ fn build_lz4() {
         .define("NDEBUG", None)
         .warnings(true)
         .warnings_into_errors(true)
+        .flag("-fvisibility=hidden")
+        // C code never throws: drop unwind tables.
+        .flag("-fno-asynchronous-unwind-tables")
+        .flag("-fno-unwind-tables")
         .include(root.join("src"))
         .include(root.join("vendor/lib"))
         .files(LZ4_SOURCES)
@@ -116,6 +109,8 @@ fn build_zucchini() {
         .flag("-fdata-sections")
         .flag("-fno-exceptions")
         .flag("-fno-rtti")
+        .flag("-fvisibility=hidden")
+        .flag("-fvisibility-inlines-hidden")
         .flag("-Wno-deprecated-declarations")
         .flag("-Wno-unused-parameter")
         .include(root.join("include"))
@@ -160,7 +155,7 @@ fn add_static_runtime(compiler: &cc::Tool, archive: &str, library: &str) {
 
 fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("unable to read {}: {error}", directory.display()));
+        .unwrap_or_else(|error| panic!("unable to read native source entry: {error}"));
     for entry in entries {
         let path = entry.expect("unable to read native source entry").path();
         if path.is_dir() {

@@ -28,7 +28,6 @@ protoc-bin-vendored = "3.2.0"
 [dependencies]
 anyhow = "1.0.69"
 brotli = "8.0.2"
-bsdiff-android = "0.0.2"
 bzip2 = { version = "0.6.0" }
 clap = { version = "4.2.1", features = ["derive"] }
 color-print = "0.3.4"
@@ -52,4 +51,15 @@ zstd = "0.13.2"
 codegen-units = 1
 debug = 0
 lto = true
+strip = true
+
+# Static CLI builds (CI + install.sh): panic=abort drops unwinding machinery.
+# Kept out of [profile.release] because maturin wheel builds use the `release`
+# profile and must preserve unwinding so panics surface as Python exceptions.
+[profile.release-cli]
+codegen-units = 1
+debug = 0
+inherits = "release"
+lto = true
+panic = "abort"
 strip = true

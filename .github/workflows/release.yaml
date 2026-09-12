@@ -112,17 +112,17 @@ jobs:
       - name: Build binary (Linux)
         if: runner.os == 'Linux' && !contains(matrix.target, 'android')
         run: |
-          cargo zigbuild --release --locked --target=${{ matrix.target }} --color=always --verbose
+          cargo zigbuild --profile release-cli --locked --target=${{ matrix.target }} --color=always --verbose --bin otadump
 
       - name: Build binary (Android)
         if: contains(matrix.target, 'android')
         run: |
-          cargo ndk --target=${{ matrix.target }} build --release --locked --color=always --verbose
+          cargo ndk --target=${{ matrix.target }} build --profile release-cli --locked --color=always --verbose --bin otadump
 
       - name: Build binary (macOS / Windows)
         if: runner.os == 'macOS' || runner.os == 'Windows'
         run: |
-          cargo build --release --locked --target=${{ matrix.target }} --color=always --verbose
+          cargo build --profile release-cli --locked --target=${{ matrix.target }} --color=always --verbose --bin otadump
 
       - name: Package (*nix)
         if: runner.os != 'Windows'
@@ -134,7 +134,7 @@ jobs:
           native/zucchini/vendor/libchrome/base/third_party/icu/LICENSE
           native/zucchini/vendor/libchrome/base/third_party/nspr/LICENSE
           native/zucchini/vendor/libchrome/base/third_party/nspr/MPL-1.1.txt
-          -C target/${{ matrix.target }}/release/ otadump
+          -C target/${{ matrix.target }}/release-cli/ otadump
           | gzip --best
           > 'otadump-${{ steps.get_version.outputs.value }}-${{ matrix.target }}.tar.gz'
       - name: Package (Windows)
@@ -147,7 +147,7 @@ jobs:
           native/zucchini/vendor/libchrome/base/third_party/icu/LICENSE
           native/zucchini/vendor/libchrome/base/third_party/nspr/LICENSE
           native/zucchini/vendor/libchrome/base/third_party/nspr/MPL-1.1.txt
-          ./target/${{ matrix.target }}/release/otadump.exe
+          ./target/${{ matrix.target }}/release-cli/otadump.exe
       - name: Upload artifact
         uses: actions/upload-artifact@v4.6.0
         with:

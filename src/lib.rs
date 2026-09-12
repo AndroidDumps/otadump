@@ -3,6 +3,7 @@
 mod chromeos_update_engine {
     include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
 }
+mod bsdiff;
 pub mod lz4;
 mod lz4diff;
 mod payload;
@@ -26,7 +27,6 @@ use std::{error, result, slice, thread};
 
 use anyhow::{Context as _, Error, Result, bail, ensure};
 use brotli::Decompressor as BrotliDecoder;
-use bsdiff_android::parse_bsdf2_header;
 use bzip2::read::BzDecoder;
 use chromeos_update_engine::install_operation::Type;
 use chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
@@ -1283,8 +1283,7 @@ pub(crate) fn apply_bsdiff(
     puffin::validate_bsdiff_resources(patch, expected_output_len, cancellation_token)?;
     cancellation_token.check()?;
 
-    let (new_size, control_data, diff_data, extra_data) =
-        parse_bsdf2_header(patch).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let (new_size, control_data, diff_data, extra_data) = bsdiff::parse_header(patch)?;
     let new_size = usize::try_from(new_size).context("Patch new_size is negative or overflows")?;
     ensure!(
         new_size == expected_output_len,

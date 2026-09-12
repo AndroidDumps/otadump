@@ -29,5 +29,8 @@ classifiers = [
 ]
 
 [tool.maturin]
+# Wheels build with the default `release` profile, which keeps `panic =
+# "unwind"` so extraction-thread panics surface as Python exceptions. The
+# `release-cli` profile (panic = "abort") is for the static CLI only.
 features = ["python"]
 locked = true

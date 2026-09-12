@@ -114,7 +114,9 @@ Extraction releases the Python GIL.
 
 ### Local release packages
 
-Build the Linux x86-64 GNU CLI with `cargo build --release --locked`.
+Build the Linux x86-64 GNU CLI with `cargo build --profile release-cli --bin otadump --locked`
+(`release-cli` adds `panic = "abort"` on top of `release`; the plain `release`
+profile keeps unwinding so Python wheels can raise panics as exceptions).
 Build the ABI3 Python wheel with `uv build --wheel`.
 The wheel supports Python 3.9 and later and uses the build host's glibc baseline.
 Build release packages on the oldest Linux environment that you support.
