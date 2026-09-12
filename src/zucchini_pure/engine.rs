@@ -52,13 +52,58 @@ fn check_not_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
     }
 }
 
-pub(crate) fn apply_element(
-    old: &[u8],
+/// Old-image analysis shared by preflight and apply for one element.
+pub(crate) struct ElementAnalysis {
+    disasm: Box<dyn Disassembler>,
+    refs: GroupRefCache,
+}
+
+/// Per-group references for one parsed image, computed once. Ranged queries
+/// binary-search the location-sorted list instead of re-scanning the
+/// disassembler for every equivalence.
+struct GroupRefCache {
+    refs: Vec<Vec<Reference>>,
+}
+
+impl GroupRefCache {
+    fn build(disasm: &dyn Disassembler, image: &[u8]) -> Result<Self> {
+        let groups = disasm.groups();
+        let size = disasm.size();
+        let mut refs = Vec::new();
+        refs.try_reserve_exact(groups.len())
+            .map_err(|_| super::allocation_error("Zucchini reference groups"))?;
+        for group in 0..groups.len() {
+            refs.push(disasm.read(group, image, 0, size)?);
+        }
+        Ok(Self { refs })
+    }
+
+    fn full(&self, group: usize) -> &[Reference] {
+        &self.refs[group]
+    }
+
+    fn range(&self, group: usize, lo: u32, hi: u32) -> &[Reference] {
+        let refs = &self.refs[group];
+        let start = refs.partition_point(|reference| reference.location < lo);
+        let end = refs.partition_point(|reference| reference.location < hi);
+        &refs[start..end]
+    }
+}
+
+/// Parses the old element and caches its per-group references once.
+pub(crate) fn analyze_element(exe_type: u32, old_element: &[u8]) -> Result<ElementAnalysis> {
+    let disasm = make_disassembler(exe_type, old_element)
+        .ok_or_else(|| apply_error("failed to create old disassembler"))?;
+    let refs = GroupRefCache::build(&*disasm, old_element)?;
+    Ok(ElementAnalysis { disasm, refs })
+}
+
+/// Splits the element's old and new regions out of the images.
+pub(crate) fn element_regions<'a>(
+    old: &'a [u8],
     element: &PatchElement,
-    output: &mut [u8],
-    cancelled: &dyn Fn() -> bool,
-) -> Result<()> {
-    check_not_cancelled(cancelled)?;
+    output: &'a mut [u8],
+) -> Result<(&'a [u8], &'a mut [u8])> {
     let matching = &element.element_match;
     let old_end = (matching.old_offset as usize)
         .checked_add(matching.old_size as usize)
@@ -72,10 +117,28 @@ pub(crate) fn apply_element(
     let new_element = output
         .get_mut(matching.new_offset as usize..new_end)
         .ok_or_else(|| apply_error("new element out of bounds"))?;
+    Ok((old_element, new_element))
+}
 
+pub(crate) fn apply_element(
+    element: &PatchElement,
+    old_element: &[u8],
+    new_element: &mut [u8],
+    analysis: &ElementAnalysis,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    check_not_cancelled(cancelled)?;
     apply_equivalence_and_extra_data(old_element, element, new_element, cancelled)?;
     apply_raw_delta(element, new_element, cancelled)?;
-    apply_references_correction(matching.exe_type, old_element, element, new_element, cancelled)?;
+    apply_references_correction(
+        element.element_match.exe_type,
+        old_element,
+        element,
+        new_element,
+        &*analysis.disasm,
+        &analysis.refs,
+        cancelled,
+    )?;
     Ok(())
 }
 
@@ -83,9 +146,10 @@ pub(crate) fn apply_element(
 /// equivalence/extra/raw data to a scratch output, then run the Android
 /// boundary and DEX-target validations that upstream Zucchini does not.
 pub(crate) fn preflight_element(
-    old: &[u8],
     element: &PatchElement,
-    output: &mut [u8],
+    old_element: &[u8],
+    new_element: &mut [u8],
+    analysis: &ElementAnalysis,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let exe_type = element.element_match.exe_type;
@@ -94,25 +158,10 @@ pub(crate) fn preflight_element(
     }
     check_not_cancelled(cancelled)?;
 
-    let matching = &element.element_match;
-    let old_end = (matching.old_offset as usize)
-        .checked_add(matching.old_size as usize)
-        .ok_or_else(|| apply_error("old element range overflow"))?;
-    let new_end = (matching.new_offset as usize)
-        .checked_add(matching.new_size as usize)
-        .ok_or_else(|| apply_error("new element range overflow"))?;
-    let old_element = old
-        .get(matching.old_offset as usize..old_end)
-        .ok_or_else(|| apply_error("old element out of bounds"))?;
-    let new_element = output
-        .get_mut(matching.new_offset as usize..new_end)
-        .ok_or_else(|| apply_error("new element out of bounds"))?;
-
     apply_equivalence_and_extra_data(old_element, element, new_element, cancelled)?;
     apply_raw_delta(element, new_element, cancelled)?;
 
-    let old_disasm = make_disassembler(exe_type, old_element)
-        .ok_or_else(|| apply_error("failed to create old disassembler"))?;
+    let old_disasm = &*analysis.disasm;
     let new_disasm = make_disassembler(exe_type, new_element)
         .ok_or_else(|| apply_error("failed to create new disassembler"))?;
     if old_disasm.size() != old_element.len() as u32
@@ -122,10 +171,10 @@ pub(crate) fn preflight_element(
     }
     let new_size = new_element.len() as u32;
     if !validate_reference_boundaries(
-        &*old_disasm,
+        old_disasm,
+        &analysis.refs,
         exe_type,
         element,
-        old_element,
         new_size,
         cancelled,
     )? {
@@ -136,10 +185,10 @@ pub(crate) fn preflight_element(
             return Err(apply_error("dex writer width violation"));
         }
         if !validate_dex_reference_targets(
-            &*old_disasm,
+            old_disasm,
             &*new_disasm,
+            &analysis.refs,
             element,
-            old_element,
             new_element,
             cancelled,
         )? {
@@ -154,9 +203,9 @@ pub(crate) fn preflight_element(
 /// if the caller cancels.
 fn validate_reference_boundaries(
     old_disasm: &dyn Disassembler,
+    cache: &GroupRefCache,
     exe_type: u32,
     element: &PatchElement,
-    old_image: &[u8],
     new_size: u32,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<bool> {
@@ -170,7 +219,6 @@ fn validate_reference_boundaries(
     }
     boundaries.sort_unstable();
 
-    let old_size = old_image.len() as u32;
     for (group_index, group) in old_disasm.groups().iter().enumerate() {
         check_not_cancelled(cancelled)?;
         let mut writer_width = group.width;
@@ -182,7 +230,7 @@ fn validate_reference_boundaries(
             }
         }
 
-        for reference in old_disasm.read(group_index, old_image, 0, old_size)? {
+        for reference in cache.full(group_index) {
             let boundary = boundaries.partition_point(|value| *value <= reference.location);
             if boundary < boundaries.len()
                 && boundaries[boundary] < reference.location.wrapping_add(group.width)
@@ -193,12 +241,8 @@ fn validate_reference_boundaries(
 
         for equivalence in &element.equivalences {
             check_not_cancelled(cancelled)?;
-            for reference in old_disasm.read(
-                group_index,
-                old_image,
-                equivalence.src_offset,
-                equivalence.src_end(),
-            )? {
+            for reference in cache.range(group_index, equivalence.src_offset, equivalence.src_end())
+            {
                 if reference.location < equivalence.src_offset
                     || reference.location > equivalence.src_end()
                     || group.width > equivalence.src_end() - reference.location
@@ -222,8 +266,8 @@ fn validate_reference_boundaries(
 fn validate_dex_reference_targets(
     old_disasm: &dyn Disassembler,
     new_disasm: &dyn Disassembler,
+    cache: &GroupRefCache,
     element: &PatchElement,
-    old_image: &[u8],
     new_image: &[u8],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<bool> {
@@ -235,10 +279,9 @@ fn validate_dex_reference_targets(
     }
 
     let mut deltas = element.reference_deltas.iter();
-    let old_size = old_image.len() as u32;
     let mapper = OffsetMapper::new(
         &element.equivalences,
-        old_size,
+        old_disasm.size(),
         new_image.len() as u32,
     )?;
 
@@ -246,7 +289,7 @@ fn validate_dex_reference_targets(
         check_not_cancelled(cancelled)?;
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
-            targets.insert_references(&old_disasm.read(group_index, old_image, 0, old_size)?)?;
+            targets.insert_references(cache.full(group_index))?;
         }
         targets.filter_and_project(&mapper)?;
         if let Some(extra) = element.extra_targets.get(pool_tag) {
@@ -263,12 +306,9 @@ fn validate_dex_reference_targets(
             }
             for equivalence in &element.equivalences {
                 check_not_cancelled(cancelled)?;
-                for reference in old_disasm.read(
-                    group_index,
-                    old_image,
-                    equivalence.src_offset,
-                    equivalence.src_end(),
-                )? {
+                for reference in
+                    cache.range(group_index, equivalence.src_offset, equivalence.src_end())
+                {
                     let projected = mapper.extended_forward_project(reference.target);
                     let expected = targets.key_for_nearest_offset(projected);
                     let Some(delta) = deltas.next() else { return Ok(false) };
@@ -420,11 +460,11 @@ fn apply_references_correction(
     old_image: &[u8],
     element: &PatchElement,
     new_image: &mut [u8],
+    old_disasm: &dyn Disassembler,
+    cache: &GroupRefCache,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     check_not_cancelled(cancelled)?;
-    let old_disasm = make_disassembler(exe_type, old_image)
-        .ok_or_else(|| apply_error("failed to create old disassembler"))?;
     let new_disasm = make_disassembler(exe_type, new_image)
         .ok_or_else(|| apply_error("failed to create new disassembler"))?;
     if old_disasm.size() != old_image.len() as u32 || new_disasm.size() != new_image.len() as u32 {
@@ -449,8 +489,7 @@ fn apply_references_correction(
         check_not_cancelled(cancelled)?;
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
-            let references = old_disasm.read(group_index, old_image, 0, old_image.len() as u32)?;
-            targets.insert_references(&references)?;
+            targets.insert_references(cache.full(group_index))?;
         }
         targets.filter_and_project(&mapper)?;
 
@@ -468,14 +507,11 @@ fn apply_references_correction(
             }
             for equivalence in &element.equivalences {
                 check_not_cancelled(cancelled)?;
-                let references = old_disasm.read(
-                    group_index,
-                    old_image,
-                    equivalence.src_offset,
-                    equivalence.src_end(),
-                )?;
-                for mut reference in references {
+                for &reference in
+                    cache.range(group_index, equivalence.src_offset, equivalence.src_end())
+                {
                     check_not_cancelled(cancelled)?;
+                    let mut reference = reference;
                     let projected = mapper.extended_forward_project(reference.target);
                     let expected_key = targets.key_for_nearest_offset(projected);
                     let delta = deltas
@@ -685,4 +721,44 @@ impl TargetPool {
 fn _range_helpers() {
     let _ = range_covers;
     let _ = range_is_bounded;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// The cached per-group references must equal what a fresh ranged read
+    /// returns for every group and range.
+    #[test]
+    fn group_ref_cache_matches_ranged_reads() {
+        let fixtures = "tests/fixtures/zucchini";
+        for (name, exe_type) in [
+            ("elf-old", EXE_TYPE_ELF_X64),
+            ("elf-arm32-old", EXE_TYPE_ELF_AARCH32),
+            ("elf-arm64-old", EXE_TYPE_ELF_AARCH64),
+            ("dex-old.dex", EXE_TYPE_DEX),
+            ("dex-large-old.dex", EXE_TYPE_DEX),
+        ] {
+            let Ok(image) = fs::read(format!("{fixtures}/{name}")) else { continue };
+            let disasm = make_disassembler(exe_type, &image).unwrap();
+            let cache = GroupRefCache::build(&*disasm, &image).unwrap();
+            let size = disasm.size();
+            let ranges =
+                [(0, size), (0, size / 3), (size / 3, size * 2 / 3), (size * 2 / 3, size)];
+            for group in 0..disasm.groups().len() {
+                for &(lo, hi) in &ranges {
+                    if lo > hi || hi > size {
+                        continue;
+                    }
+                    let expected = disasm.read(group, &image, lo, hi).unwrap();
+                    assert_eq!(
+                        cache.range(group, lo, hi),
+                        expected.as_slice(),
+                        "{name} group {group} range {lo}..{hi}"
+                    );
+                }
+            }
+        }
+    }
 }

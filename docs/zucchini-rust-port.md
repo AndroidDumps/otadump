@@ -88,9 +88,41 @@ cargo clippy --all-targets --all-features -- -D warnings
 ## Cancellation and allocation
 
 `apply()` keeps its signature. `apply_with_cancel(old, patch, size, cancelled)`
-polls a `Fn() -> bool` between elements, pools, and equivalence units and returns
-`Status::Cancelled`. `src/zucchini.rs` exposes the same hook. Parser allocations
-derived from attacker-controlled counts use `try_reserve`.
+polls a `Fn() -> bool` and returns `Status::Cancelled`. Poll sites cover the
+old/new CRC chunk loops, element boundaries, raw-delta application, reference
+correction (per reference), and both preflight validators (per group and per
+equivalence). `src/zucchini.rs` exposes the same hook, and
+`run_op_zucchini` passes the extraction token and converts a cancelled apply
+back into the typed `ExtractionCancelled` error so the extraction layer unwinds
+cleanly. Cancellation is never folded into the preflight `ApplyError`.
+
+Every vector derived from attacker-controlled counts reserves with
+`try_reserve` (fallible) and surfaces `Status::AllocationFailure`; the patch
+parser also bounds `element_count` and `pool_count` by the remaining patch
+bytes before allocating. `Disassembler::read` is fallible end to end.
+
+## Performance
+
+DEX instructions are decoded once at parse time into a flat, location-sorted
+list. `analyze_element` then materialises each reference group once, and both
+preflight and apply binary-search that snapshot (`GroupRefCache`) instead of
+re-running `groups × equivalences × items` scans; preflight and apply share the
+same analysis for an element.
+
+Measured with a standalone harness on this machine (`-C opt-level=3`), five
+runs each, comparing the commit before the cache with the current tree:
+
+| Fixture | Before | After |
+| --- | --- | --- |
+| `dex` | ~0.013 ms/iter | ~0.009 ms/iter |
+| `dex-large` | ~6.4 ms/iter | ~6.0 ms/iter |
+| `elf` | ~0.019 ms/iter | ~0.018 ms/iter |
+
+The large DEX fixture has a single equivalence and is dominated by its 65k
+item-list walks, so the structural scan reduction mostly shows on the small
+fixture; many-equivalence partitions benefit more. `group_ref_cache_matches_ranged_reads`
+asserts the cached snapshot is byte-identical to fresh ranged reads for every
+group and range on the ELF/DEX fixtures.
 
 ## Intentional behavioural and size deltas
 
@@ -110,16 +142,11 @@ derived from attacker-controlled counts use `try_reserve`.
 
 ## Remaining work
 
-1. **Performance parity.** The C++ readers are lazy state machines; the Rust
-   `read` recomputes each group's references per range query, so DEX apply is
-   `O(groups × equivalences × items)`. Correct but slower on real partitions.
-   Cache each group's full reference list once per parsed image before
-   production cutover.
-2. **Differential testing.** Building the native path
-   (`OTADUMP_NATIVE_ZUCCHINI=1 cargo test`) enables
+1. **Differential testing.** Building the native path
+   (`OTADUMP_NATIVE_ZUCCHINI=1 cargo test`, exact value `1` required) enables
    `native_and_pure_agree_on_all_fixtures`. That build currently fails to link in
    this environment on pre-existing libchrome symbols
    (`base::Histogram::FactoryGet` from `activity_tracker.cc`), unrelated to the
    Rust port; the default, pure build is unaffected.
-3. **Non-Android formats (Win32, ZTF).** Not emitted by Android payloads and
+2. **Non-Android formats (Win32, ZTF).** Not emitted by Android payloads and
    intentionally rejected.

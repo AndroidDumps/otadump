@@ -185,19 +185,20 @@ fn apply_inner(
     }
     for element in &patch.elements {
         check()?;
-        engine::preflight_element(old, element, &mut output, cancelled).map_err(|error| {
-            // Preserve cooperative cancellation; everything else is a
-            // preflight validation failure.
-            match error.status() {
+        let exe_type = element.element_match.exe_type;
+        // Parse and cache the old element's per-group references once, then
+        // share them between preflight and apply (the native FFI re-reads them
+        // for every equivalence in both phases).
+        let (old_element, new_element) = engine::element_regions(old, element, &mut output)?;
+        let analysis = engine::analyze_element(exe_type, old_element)?;
+        engine::preflight_element(element, old_element, new_element, &analysis, cancelled).map_err(
+            |error| match error.status() {
                 Status::Cancelled => error,
                 _ => Error::new(Status::ApplyError, "android executable preflight failed"),
-            }
-        })?;
-    }
-
-    for element in &patch.elements {
-        check()?;
-        engine::apply_element(old, element, &mut output, cancelled)?;
+            },
+        )?;
+        let (old_element, new_element) = engine::element_regions(old, element, &mut output)?;
+        engine::apply_element(element, old_element, new_element, &analysis, cancelled)?;
     }
 
     if !patch::check_new_file_cancel(&patch.header, &output, cancelled)? {

@@ -147,6 +147,8 @@ pub struct DexDisassembler {
     call_site_map: MapItem,
     method_handle_map: MapItem,
     code_item_offsets: Vec<u32>,
+    code_item_instruction_start: Vec<usize>,
+    instructions: Vec<InstructionValue>,
     type_list_offsets: Vec<u32>,
     annotation_set_ref_list_offsets: Vec<u32>,
     annotation_set_offsets: Vec<u32>,
@@ -237,6 +239,19 @@ impl DexDisassembler {
             return None;
         }
 
+        // Parse every code item's instruction stream once. All 42 reference
+        // groups then filter this flat, location-sorted list instead of
+        // re-decoding instructions for every group and equivalence range.
+        let mut code_item_instruction_start = Vec::new();
+        code_item_instruction_start.try_reserve_exact(code_item_offsets.len()).ok()?;
+        let mut instructions = Vec::new();
+        for &offset in &code_item_offsets {
+            code_item_instruction_start.push(instructions.len());
+            let parsed = parse_instructions(image, offset).ok()?;
+            instructions.try_reserve(parsed.len()).ok()?;
+            instructions.extend_from_slice(&parsed);
+        }
+
         Some(DexDisassembler {
             size: file_size,
             groups: build_groups(),
@@ -249,6 +264,8 @@ impl DexDisassembler {
             call_site_map: get(T_CALL_SITE_ID),
             method_handle_map: get(T_METHOD_HANDLE),
             code_item_offsets,
+            code_item_instruction_start,
+            instructions,
             type_list_offsets,
             annotation_set_ref_list_offsets,
             annotation_set_offsets,
@@ -760,7 +777,7 @@ fn cached_item_list_reader(
     Ok(result)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct InstructionValue {
     instr_offset: u32,
     opcode: u8,
@@ -890,6 +907,8 @@ fn instruction_reader(
     lo: u32,
     hi: u32,
     code_item_offsets: &[u32],
+    code_item_instruction_start: &[usize],
+    instructions: &[InstructionValue],
     filter: CodeFilter,
     mapper: InstrMapper,
 ) -> Result<Vec<Reference>> {
@@ -900,32 +919,28 @@ fn instruction_reader(
     if index != 0 {
         index -= 1;
     }
+    let start = code_item_instruction_start[index];
     let mut result = Vec::new();
     result
         .try_reserve((hi.saturating_sub(lo) / 2) as usize)
         .map_err(|_| super::allocation_error("DEX code references"))?;
-    loop {
-        for value in parse_instructions(image, code_item_offsets[index])? {
-            if value.instr_offset >= hi {
-                return Ok(result);
-            }
-            let Some(location) = filter_location(filter, value) else { continue };
-            if location == K_INVALID_OFFSET || location < lo {
-                continue;
-            }
-            if location >= hi {
-                return Ok(result);
-            }
-            let target = run_instr_mapper(mapper, image, location);
-            if target != K_INVALID_OFFSET {
-                result.push(Reference { location, target });
-            }
+    for value in &instructions[start..] {
+        if value.instr_offset >= hi {
+            break;
         }
-        index += 1;
-        if index >= code_item_offsets.len() {
-            return Ok(result);
+        let Some(location) = filter_location(filter, *value) else { continue };
+        if location == K_INVALID_OFFSET || location < lo {
+            continue;
+        }
+        if location >= hi {
+            break;
+        }
+        let target = run_instr_mapper(mapper, image, location);
+        if target != K_INVALID_OFFSET {
+            result.push(Reference { location, target });
         }
     }
+    Ok(result)
 }
 
 // Writers.
@@ -1027,6 +1042,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::String16,
                 InstrMapper::TargetIndex { map: self.string_map, item_size: 4, width },
             ),
@@ -1035,6 +1052,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::String32,
                 InstrMapper::TargetIndex { map: self.string_map, item_size: 4, width },
             ),
@@ -1057,6 +1076,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Type,
                 InstrMapper::TargetIndex { map: self.type_map, item_size: 4, width },
             ),
@@ -1065,6 +1086,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Proto,
                 InstrMapper::TargetIndex { map: self.proto_map, item_size: 12, width },
             ),
@@ -1074,6 +1097,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Field,
                 InstrMapper::TargetIndex { map: self.field_map, item_size: 8, width },
             ),
@@ -1105,6 +1130,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Method,
                 InstrMapper::TargetIndex { map: self.method_map, item_size: 8, width },
             ),
@@ -1144,6 +1171,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::CallSite,
                 InstrMapper::TargetIndex { map: self.call_site_map, item_size: 4, width },
             ),
@@ -1152,6 +1181,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::MethodHandle,
                 InstrMapper::TargetIndex { map: self.method_handle_map, item_size: 8, width },
             ),
@@ -1221,6 +1252,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Rel8,
                 InstrMapper::RelCode8,
             ),
@@ -1229,6 +1262,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Rel16,
                 InstrMapper::RelCode16,
             ),
@@ -1237,6 +1272,8 @@ impl Disassembler for DexDisassembler {
                 lo,
                 hi,
                 &self.code_item_offsets,
+                &self.code_item_instruction_start,
+                &self.instructions,
                 CodeFilter::Rel32,
                 InstrMapper::RelCode32,
             ),
