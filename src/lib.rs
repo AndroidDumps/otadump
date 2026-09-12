@@ -11,6 +11,7 @@ mod puffin;
 mod python;
 mod verity;
 pub mod zucchini;
+pub mod zucchini_pure;
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
