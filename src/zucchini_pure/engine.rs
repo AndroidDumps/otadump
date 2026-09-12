@@ -44,11 +44,21 @@ fn apply_error(message: impl Into<String>) -> Error {
     Error::new(Status::ApplyError, message)
 }
 
+fn check_not_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if cancelled() {
+        Err(Error::new(Status::Cancelled, "Zucchini apply cancelled"))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn apply_element(
     old: &[u8],
     element: &PatchElement,
     output: &mut [u8],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
+    check_not_cancelled(cancelled)?;
     let matching = &element.element_match;
     let old_end = (matching.old_offset as usize)
         .checked_add(matching.old_size as usize)
@@ -63,9 +73,9 @@ pub(crate) fn apply_element(
         .get_mut(matching.new_offset as usize..new_end)
         .ok_or_else(|| apply_error("new element out of bounds"))?;
 
-    apply_equivalence_and_extra_data(old_element, element, new_element)?;
+    apply_equivalence_and_extra_data(old_element, element, new_element, cancelled)?;
     apply_raw_delta(element, new_element)?;
-    apply_references_correction(matching.exe_type, old_element, element, new_element)?;
+    apply_references_correction(matching.exe_type, old_element, element, new_element, cancelled)?;
     Ok(())
 }
 
@@ -76,11 +86,13 @@ pub(crate) fn preflight_element(
     old: &[u8],
     element: &PatchElement,
     output: &mut [u8],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let exe_type = element.element_match.exe_type;
     if exe_type == EXE_TYPE_NOOP || !is_android_executable(exe_type) {
         return Ok(());
     }
+    check_not_cancelled(cancelled)?;
 
     let matching = &element.element_match;
     let old_end = (matching.old_offset as usize)
@@ -96,7 +108,7 @@ pub(crate) fn preflight_element(
         .get_mut(matching.new_offset as usize..new_end)
         .ok_or_else(|| apply_error("new element out of bounds"))?;
 
-    apply_equivalence_and_extra_data(old_element, element, new_element)?;
+    apply_equivalence_and_extra_data(old_element, element, new_element, cancelled)?;
     apply_raw_delta(element, new_element)?;
 
     let old_disasm = make_disassembler(exe_type, old_element)
@@ -270,11 +282,13 @@ fn apply_equivalence_and_extra_data(
     old_image: &[u8],
     element: &PatchElement,
     new_image: &mut [u8],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let mut extra_cursor = 0usize;
     let mut dst_it = 0usize;
 
     for equivalence in &element.equivalences {
+        check_not_cancelled(cancelled)?;
         let next_dst_it = equivalence.dst_offset as usize;
         if next_dst_it < dst_it {
             return Err(apply_error("overlapping equivalences"));
@@ -381,7 +395,9 @@ fn apply_references_correction(
     old_image: &[u8],
     element: &PatchElement,
     new_image: &mut [u8],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
+    check_not_cancelled(cancelled)?;
     let old_disasm = make_disassembler(exe_type, old_image)
         .ok_or_else(|| apply_error("failed to create old disassembler"))?;
     let new_disasm = make_disassembler(exe_type, new_image)
@@ -405,6 +421,7 @@ fn apply_references_correction(
 
     let mut deltas = element.reference_deltas.iter();
     for (pool_tag, sub_groups) in &pools {
+        check_not_cancelled(cancelled)?;
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
             let references = old_disasm.read(group_index, old_image, 0, old_image.len() as u32);
@@ -425,6 +442,7 @@ fn apply_references_correction(
                 return Err(apply_error("new reference group is missing"));
             }
             for equivalence in &element.equivalences {
+                check_not_cancelled(cancelled)?;
                 let references = old_disasm.read(
                     group_index,
                     old_image,

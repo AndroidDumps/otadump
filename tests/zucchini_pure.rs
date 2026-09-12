@@ -156,3 +156,21 @@ fn pure_rust_rejects_malformed_trailing_reference_delta() {
     let error = zucchini_pure::apply(old, &malformed, new.len()).unwrap_err();
     assert_eq!(error.status(), Status::ApplyError);
 }
+
+#[test]
+fn pure_rust_honors_cancellation() {
+    use std::cell::Cell;
+
+    let fixtures = Path::new(FIXTURES);
+    let old = fs::read(fixtures.join("noop-old.bin")).unwrap();
+    let patch = fs::read(fixtures.join("noop.zuc")).unwrap();
+    let new_size = fs::metadata(fixtures.join("noop-new.bin")).unwrap().len() as usize;
+
+    let calls = Cell::new(0);
+    let error = zucchini_pure::apply_with_cancel(&old, &patch, new_size, || {
+        calls.set(calls.get() + 1);
+        calls.get() > 1
+    })
+    .unwrap_err();
+    assert_eq!(error.status(), Status::Cancelled);
+}

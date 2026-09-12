@@ -50,6 +50,7 @@ pub enum Status {
     ApplyError,
     AllocationFailure,
     UnsupportedTarget,
+    Cancelled,
     Unknown(i32),
 }
 
@@ -104,6 +105,38 @@ pub trait Disassembler {
 
 /// Applies a Zucchini patch into a newly allocated, exact-size output buffer.
 pub fn apply(old: &[u8], patch_bytes: &[u8], output_size: usize) -> Result<Vec<u8>> {
+    apply_with_cancel(old, patch_bytes, output_size, || false)
+}
+
+/// Same as [`apply`], but polls `cancelled` between elements, pools, and
+/// equivalence units and returns [`Status::Cancelled`] if it becomes true.
+///
+/// This keeps the original [`apply`] signature intact while giving callers a
+/// cooperative stop hook (for example, a UI or signal-driven token).
+pub fn apply_with_cancel<F: Fn() -> bool>(
+    old: &[u8],
+    patch_bytes: &[u8],
+    output_size: usize,
+    cancelled: F,
+) -> Result<Vec<u8>> {
+    apply_inner(old, patch_bytes, output_size, &cancelled)
+}
+
+fn apply_inner(
+    old: &[u8],
+    patch_bytes: &[u8],
+    output_size: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>> {
+    let check = || -> Result<()> {
+        if cancelled() {
+            Err(Error::new(Status::Cancelled, "Zucchini apply cancelled"))
+        } else {
+            Ok(())
+        }
+    };
+
+    check()?;
     if old.len() >= OFFSET_BOUND || output_size >= OFFSET_BOUND {
         return Err(Error::new(Status::InvalidArgument, "image exceeds Zucchini offset bound"));
     }
@@ -141,13 +174,15 @@ pub fn apply(old: &[u8], patch_bytes: &[u8], output_size: usize) -> Result<Vec<u
     // Android hardens upstream apply with an additional preflight. Mirror the
     // native FFI so unsafe patches are rejected before publication.
     for element in &patch.elements {
-        engine::preflight_element(old, element, &mut output).map_err(|_| {
+        check()?;
+        engine::preflight_element(old, element, &mut output, cancelled).map_err(|_| {
             Error::new(Status::ApplyError, "android executable preflight failed")
         })?;
     }
 
     for element in &patch.elements {
-        engine::apply_element(old, element, &mut output)?;
+        check()?;
+        engine::apply_element(old, element, &mut output, cancelled)?;
     }
 
     if !patch::check_new_file(&patch.header, &output) {
