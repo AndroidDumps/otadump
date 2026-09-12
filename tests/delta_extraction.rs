@@ -81,6 +81,48 @@ struct DeltaArchiveManifest {
     partitions: Vec<PartitionUpdate>,
 }
 
+#[derive(Clone, Copy, PartialEq, Message)]
+struct Lz4diffAlgorithm {
+    #[prost(int32, tag = "1")]
+    algorithm_type: i32,
+    #[prost(int32, tag = "2")]
+    level: i32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Lz4diffBlock {
+    #[prost(uint64, tag = "1")]
+    uncompressed_offset: u64,
+    #[prost(uint64, tag = "2")]
+    uncompressed_length: u64,
+    #[prost(uint64, tag = "3")]
+    compressed_length: u64,
+    #[prost(bytes = "vec", tag = "4")]
+    sha256_hash: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    postfix_bspatch: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Lz4diffCompressionInfo {
+    #[prost(message, optional, tag = "1")]
+    algo: Option<Lz4diffAlgorithm>,
+    #[prost(message, repeated, tag = "2")]
+    block_info: Vec<Lz4diffBlock>,
+    #[prost(bool, tag = "3")]
+    zero_padding_enabled: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Lz4diffHeader {
+    #[prost(message, optional, tag = "1")]
+    src_info: Option<Lz4diffCompressionInfo>,
+    #[prost(message, optional, tag = "2")]
+    dst_info: Option<Lz4diffCompressionInfo>,
+    #[prost(int32, tag = "3")]
+    inner_type: i32,
+}
+
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     digest::digest(&digest::SHA256, bytes).as_ref().to_vec()
 }
@@ -106,6 +148,189 @@ const BROTLI_INVALID_HEADER_PATCH: &[u8] = &[
 ];
 
 const PUFFIN_FIXTURES: &str = "tests/fixtures/puffin";
+const LZ4DIFF_FIXTURES: &str = "tests/fixtures/lz4diff";
+
+fn run_lz4diff_bytes(
+    source: &[u8],
+    target: &[u8],
+    patch: &[u8],
+    operation_type: i32,
+) -> Result<Vec<u8>, String> {
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(source_dir.join("system.img"), source).unwrap();
+
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(1),
+        minor_version: Some(9),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(source)),
+            new_partition_info: Some(partition_info(target)),
+            operations: vec![InstallOperation {
+                operation_type,
+                data_offset: Some(0),
+                data_length: Some(patch.len() as u64),
+                src_extents: vec![extent(0, source.len() as u64)],
+                src_length: Some(source.len() as u64),
+                dst_extents: vec![extent(0, target.len() as u64)],
+                dst_length: Some(target.len() as u64),
+                data_sha256_hash: Some(sha256(patch)),
+                src_sha256_hash: Some(sha256(source)),
+            }],
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, patch);
+
+    match ExtractOptions::new().source_dir(&source_dir).extract(&payload, &output_dir) {
+        Ok(()) => {
+            assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+            assert_eq!(fs::read_dir(&output_dir).unwrap().count(), 1);
+            Ok(fs::read(output_dir.join("system.img")).unwrap())
+        }
+        Err(error) => {
+            assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+            assert!(!output_dir.join("system.img").exists());
+            assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+            Err(error.to_string())
+        }
+    }
+}
+
+fn run_lz4diff_extraction(name: &str, operation_type: i32) -> Result<Vec<u8>, String> {
+    let fixtures = Path::new(LZ4DIFF_FIXTURES).join(name);
+    let source = fs::read(fixtures.join("source.bin")).unwrap();
+    let target = fs::read(fixtures.join("target.bin")).unwrap();
+    let patch = fs::read(fixtures.join("patch.lz4diff")).unwrap();
+    run_lz4diff_bytes(&source, &target, &patch, operation_type)
+}
+
+fn rewrite_lz4diff_header(patch: &[u8], change: impl FnOnce(&mut Lz4diffHeader)) -> Vec<u8> {
+    let header_size = u32::from_be_bytes(patch[11..15].try_into().unwrap()) as usize;
+    let mut header = Lz4diffHeader::decode(&patch[16..16 + header_size]).unwrap();
+    change(&mut header);
+    let header = header.encode_to_vec();
+    let mut changed = Vec::with_capacity(16 + header.len() + patch.len() - 16 - header_size);
+    changed.extend_from_slice(b"LZ4DIFF");
+    changed.extend_from_slice(&1u32.to_be_bytes());
+    changed.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    changed.push(0);
+    changed.extend_from_slice(&header);
+    changed.extend_from_slice(&patch[16 + header_size..]);
+    changed
+}
+
+#[test]
+fn lz4diff_operations_reconstruct_frozen_targets() {
+    for (name, operation_type) in [
+        ("lz4-bsdiff", 12),
+        ("lz4hc9-bsdiff", 12),
+        ("zero-padding-bsdiff", 12),
+        ("postfix-bsdiff", 12),
+        ("raw-puffdiff", 13),
+    ] {
+        let expected = fs::read(Path::new(LZ4DIFF_FIXTURES).join(name).join("target.bin")).unwrap();
+        let output = run_lz4diff_extraction(name, operation_type).unwrap();
+        assert_eq!(output, expected, "fixture {name}");
+    }
+}
+
+#[test]
+fn malformed_lz4diff_data_fails_without_publication_or_process_failure() {
+    let fixtures = Path::new(LZ4DIFF_FIXTURES).join("postfix-bsdiff");
+    let source = fs::read(fixtures.join("source.bin")).unwrap();
+    let target = fs::read(fixtures.join("target.bin")).unwrap();
+    let valid = fs::read(fixtures.join("patch.lz4diff")).unwrap();
+
+    let mut bad_magic = valid.clone();
+    bad_magic[0] = b'X';
+    let mut bad_version = valid.clone();
+    bad_version[7..11].copy_from_slice(&2u32.to_be_bytes());
+    let mut bad_padding = valid.clone();
+    bad_padding[15] = 1;
+    let mut overrun = valid.clone();
+    overrun[11..15].copy_from_slice(&u32::MAX.to_be_bytes());
+    let malformed_proto =
+        [b"LZ4DIFF".as_slice(), &1u32.to_be_bytes(), &1u32.to_be_bytes(), &[0, 0x80]].concat();
+    let mut nested_header = vec![0x23; 101];
+    nested_header.extend(std::iter::repeat_n(0x24, 101));
+    let mut excessive_nesting = Vec::new();
+    excessive_nesting.extend_from_slice(b"LZ4DIFF");
+    excessive_nesting.extend_from_slice(&1u32.to_be_bytes());
+    excessive_nesting.extend_from_slice(&(nested_header.len() as u32).to_be_bytes());
+    excessive_nesting.push(0);
+    excessive_nesting.extend_from_slice(&nested_header);
+    excessive_nesting.push(0);
+    let unknown_algorithm = rewrite_lz4diff_header(&valid, |header| {
+        header.dst_info.as_mut().unwrap().algo.as_mut().unwrap().algorithm_type = 99;
+    });
+    let missing_algorithm = rewrite_lz4diff_header(&valid, |header| {
+        header.src_info.as_mut().unwrap().algo = None;
+    });
+    let bad_hc_level = rewrite_lz4diff_header(&valid, |header| {
+        let algo = header.dst_info.as_mut().unwrap().algo.as_mut().unwrap();
+        algo.algorithm_type = 2;
+        algo.level = 13;
+    });
+    let unknown_inner = rewrite_lz4diff_header(&valid, |header| header.inner_type = 7);
+    let unsorted = rewrite_lz4diff_header(&valid, |header| {
+        header.src_info.as_mut().unwrap().block_info[0].uncompressed_offset = 1;
+    });
+    let out_of_bound = rewrite_lz4diff_header(&valid, |header| {
+        header.src_info.as_mut().unwrap().block_info[0].uncompressed_length = u64::MAX;
+    });
+    let invalid_physical = rewrite_lz4diff_header(&valid, |header| {
+        let block = &mut header.src_info.as_mut().unwrap().block_info[0];
+        block.compressed_length = block.uncompressed_length + 1;
+    });
+    let short_hash = rewrite_lz4diff_header(&valid, |header| {
+        header.dst_info.as_mut().unwrap().block_info[0].sha256_hash.pop();
+    });
+    let wrong_hash = rewrite_lz4diff_header(&valid, |header| {
+        header.dst_info.as_mut().unwrap().block_info[0].sha256_hash[0] ^= 1;
+    });
+    let missing_postfix_hash = rewrite_lz4diff_header(&valid, |header| {
+        header.dst_info.as_mut().unwrap().block_info[0].sha256_hash.clear();
+    });
+    let malformed_postfix = rewrite_lz4diff_header(&valid, |header| {
+        header.dst_info.as_mut().unwrap().block_info[0].postfix_bspatch[0] = b'X';
+    });
+    let source_only_metadata = rewrite_lz4diff_header(&valid, |header| {
+        header.src_info.as_mut().unwrap().block_info[0].sha256_hash = vec![0; 32];
+    });
+
+    for (patch, expected_error) in [
+        (bad_magic, "invalid LZ4DIFF magic"),
+        (bad_version, "unsupported LZ4DIFF version"),
+        (bad_padding, "framing padding byte is not zero"),
+        (overrun, "protobuf header exceeds the maximum size"),
+        (malformed_proto, "truncated LZ4DIFF protobuf varint"),
+        (excessive_nesting, "protobuf recursion limit exceeded"),
+        (unknown_algorithm, "unknown LZ4DIFF destination compression algorithm"),
+        (missing_algorithm, "LZ4DIFF source algorithm is missing"),
+        (bad_hc_level, "LZ4HC level must be"),
+        (unknown_inner, "unknown LZ4DIFF inner patch type"),
+        (unsorted, "source blocks are not contiguous"),
+        (out_of_bound, "source uncompressed stream exceeds"),
+        (invalid_physical, "physical length exceeds its raw length"),
+        (short_hash, "SHA-256 hash must be empty or 32 bytes"),
+        (wrong_hash, "reference recompression hash mismatch"),
+        (missing_postfix_hash, "postfix patch requires a SHA-256 hash"),
+        (malformed_postfix, "postfix patch"),
+        (source_only_metadata, "contains destination-only metadata"),
+    ] {
+        let error = run_lz4diff_bytes(&source, &target, &patch, 12).unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+    }
+
+    let mismatched_inner = rewrite_lz4diff_header(&valid, |header| header.inner_type = 1);
+    let error = run_lz4diff_bytes(&source, &target, &mismatched_inner, 12).unwrap_err();
+    assert!(error.contains("operation type does not match"), "unexpected error: {error}");
+}
 
 fn run_puffdiff_extraction(source: &[u8], target: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
     let temporary = TempDir::new().unwrap();

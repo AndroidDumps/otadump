@@ -4,6 +4,7 @@ mod chromeos_update_engine {
     include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
 }
 pub mod lz4;
+mod lz4diff;
 mod payload;
 mod puffin;
 #[cfg(feature = "python")]
@@ -909,6 +910,10 @@ impl Task<'_> {
                 let patch = self.extract_data(op).context("Error extracting PUFFDIFF data")?;
                 self.run_op_puffdiff(op, patch, &mut dst_extents)
             }
+            Type::Lz4diffBsdiff | Type::Lz4diffPuffdiff => {
+                let patch = self.extract_data(op).context("Error extracting LZ4DIFF data")?;
+                self.run_op_lz4diff(op, patch, &mut dst_extents)
+            }
             Type::Zero | Type::Discard => {
                 for extent in dst_extents {
                     for chunk in extent.chunks_mut(VERIFY_CHUNK_SIZE) {
@@ -921,7 +926,6 @@ impl Task<'_> {
             Type::Move | Type::Bsdiff => {
                 bail!("Deprecated operation is not supported: {:?}", Type::try_from(op.r#type)?)
             }
-            op => bail!("Unimplemented operation: {op:?}"),
         }?;
         self.cancellation_token.check()
     }
@@ -1023,6 +1027,33 @@ impl Task<'_> {
         self.write_exact(&output, dst_extents)
     }
 
+    fn run_op_lz4diff(
+        &self,
+        op: &InstallOperation,
+        patch: &[u8],
+        dst_extents: &mut [&mut [u8]],
+    ) -> Result<()> {
+        let source_partition = self.source.as_ref().context("Source partition was not opened")?;
+        let source_ranges = extent_ranges(&op.src_extents, self.block_size, source_partition.len)?;
+        let source_size = ranges_len(&source_ranges)?;
+        let destination_size = dst_extents.iter().try_fold(0usize, |size, extent| {
+            size.checked_add(extent.len()).context("Combined LZ4DIFF destination length overflow")
+        })?;
+        let inner = match Type::try_from(op.r#type).context("Invalid operation")? {
+            Type::Lz4diffBsdiff => lz4diff::InnerPatch::Bsdiff,
+            Type::Lz4diffPuffdiff => lz4diff::InnerPatch::Puffdiff,
+            _ => bail!("Invalid LZ4DIFF operation type"),
+        };
+        let parsed =
+            lz4diff::parse(patch, source_size, destination_size, inner, self.cancellation_token)
+                .map_err(lz4diff_error)?;
+        let source = self.extract_source_data(op)?;
+        let output =
+            lz4diff::apply(&source, parsed, self.cancellation_token).map_err(lz4diff_error)?;
+        self.cancellation_token.check()?;
+        self.write_exact(&output, dst_extents)
+    }
+
     fn write_exact(&self, data: &[u8], dst_extents: &mut [&mut [u8]]) -> Result<()> {
         let dst_len = dst_extents.iter().try_fold(0usize, |len, extent| {
             len.checked_add(extent.len()).context("Combined destination length overflow")
@@ -1108,6 +1139,15 @@ impl Task<'_> {
 
     fn increment_progress(&self) {
         increment_progress(self.total_ops, self.total_ops_completed, self.progress_reporter);
+    }
+}
+
+fn lz4diff_error(error: Error) -> Error {
+    if is_cancellation(error.as_ref()) {
+        error
+    } else {
+        let message = error.to_string();
+        error.context(format!("Error in LZ4DIFF operation: {message}"))
     }
 }
 

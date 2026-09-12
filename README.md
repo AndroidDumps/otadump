@@ -82,8 +82,9 @@ otadump ota.zip
 otadump payload.bin
 
 # Apply a SOURCE_COPY, SOURCE_BSDIFF, BROTLI_BSDIFF, PUFFDIFF (inner BSDIFF or
-# ZUCCHINI), or standalone ZUCCHINI delta payload with matching base images.
-# ZUCCHINI requires Linux x86-64 GNU.
+# ZUCCHINI), standalone ZUCCHINI, or LZ4DIFF (inner BSDIFF or PUFFDIFF) delta
+# payload with matching base images.
+# ZUCCHINI and LZ4DIFF require Linux x86-64 GNU.
 otadump delta.zip --output-dir output --source-dir source-images
 ```
 

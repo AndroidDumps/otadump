@@ -64,7 +64,7 @@ pub fn decompress_safe_partial(input: &[u8], output_size: usize) -> Result<Vec<u
 /// The returned buffer always has `output_size` bytes. Short compressed output
 /// receives leading zeros when `zero_padding` is true and trailing zeros otherwise.
 pub fn compress_dest_size(input: &[u8], output_size: usize, zero_padding: bool) -> Result<Vec<u8>> {
-    compress(input, output_size, zero_padding, None)
+    compress(input, input.len(), output_size, zero_padding, None)
 }
 
 /// Compresses one complete block with the metadata-selected LZ4HC level.
@@ -79,29 +79,49 @@ pub fn compress_hc_dest_size(
             "LZ4HC compression level must be in {HC_LEVEL_MIN}..={HC_LEVEL_MAX}"
         )));
     }
-    compress(input, output_size, zero_padding, Some(compression_level))
+    compress(input, input.len(), output_size, zero_padding, Some(compression_level))
+}
+
+pub(crate) fn compress_dest_size_partial(
+    input: &[u8],
+    source_size: usize,
+    output_size: usize,
+    compression_level: Option<i32>,
+    zero_padding: bool,
+) -> Result<Vec<u8>> {
+    if let Some(level) = compression_level
+        && !(HC_LEVEL_MIN..=HC_LEVEL_MAX).contains(&level)
+    {
+        return Err(invalid_argument(format!(
+            "LZ4HC compression level must be in {HC_LEVEL_MIN}..={HC_LEVEL_MAX}"
+        )));
+    }
+    compress(input, source_size, output_size, zero_padding, compression_level)
 }
 
 fn compress(
     input: &[u8],
+    source_size: usize,
     output_size: usize,
     zero_padding: bool,
     compression_level: Option<i32>,
 ) -> Result<Vec<u8>> {
     ensure_supported()?;
     validate_sizes(input.len(), output_size)?;
-    if output_size >= input.len() {
+    if source_size == 0 || source_size > input.len() {
+        return Err(invalid_argument("LZ4 source consumption size is invalid"));
+    }
+    if output_size >= source_size {
         return Err(invalid_argument("stored LZ4 block must be smaller than its raw block"));
     }
     let mut output = allocate_output(output_size, "compression")?;
     let result = compress_native(input, &mut output, compression_level)?;
-    if result.source_size != input.len() {
+    if result.source_size != source_size {
         return Err(Error {
             status: Status::CompressionDivergence,
             message: format!(
                 "LZ4 compression consumed {} of {} source bytes",
-                result.source_size,
-                input.len()
+                result.source_size, source_size
             ),
         });
     }
