@@ -298,3 +298,11 @@ fn pure_rust_rejects_absurd_element_count() {
     let error = zucchini_pure::apply(old, &patch, new.len()).unwrap_err();
     assert_eq!(error.status(), Status::InvalidPatch);
 }
+
+/// Real-world differential case (AndroidX annotation-jvm 1.8.1 -> 1.10.0).
+/// It requires both the canonical Dalvik opcode-family mapping and the
+/// libstdc++ `std::sort` tie ordering in the equivalence-map pruning.
+#[test]
+fn pure_rust_applies_realistic_dex_differential_fixture() {
+    assert_fixture("annotation-jvm", ".dex");
+}

@@ -49,6 +49,8 @@ enum Format {
 
 #[derive(Clone, Copy, Debug)]
 struct Bytecode {
+    /// Canonical range-start opcode, mirroring `dex::Instruction::opcode`.
+    opcode: u8,
     layout: u8,
     format: Format,
 }
@@ -131,7 +133,7 @@ fn find_instruction(opcode: u8) -> Option<Bytecode> {
         .find(|(start, _, _, variant)| {
             opcode >= u16::from(*start) && opcode < u16::from(*start) + u16::from(*variant)
         })
-        .map(|(_, layout, format, _)| Bytecode { layout: *layout, format: *format })
+        .map(|(start, layout, format, _)| Bytecode { opcode: *start, layout: *layout, format: *format })
 }
 
 #[derive(Clone, Debug)]
@@ -809,12 +811,15 @@ fn parse_instructions(image: &[u8], base_offset: u32) -> Result<Vec<InstructionV
         .try_reserve((insns_end - insns_start) / 2)
         .map_err(|_| super::allocation_error("DEX instructions"))?;
     while pos < boundary {
-        let opcode = image[pos];
-        let Some(instruction) = find_instruction(opcode) else { break };
+        let raw_opcode = image[pos];
+        let Some(instruction) = find_instruction(raw_opcode) else { break };
         let length_bytes = instruction.layout as usize * 2;
         if insns_end - pos < length_bytes {
             break;
         }
+        // Filters compare the canonical range-start opcode
+        // (native `value.instr->opcode`), not the raw byte.
+        let opcode = instruction.opcode;
         if opcode == 0x26 || opcode == 0x2B || opcode == 0x2C {
             let payload_rel = read_i32(image, pos + 2).unwrap_or(0);
             // The native bound is relative to the remaining instruction bytes
@@ -1435,5 +1440,30 @@ mod tests {
         image[10..14].copy_from_slice(&0x0001_0002u32.to_le_bytes());
         assert_eq!(read_target_index(&image, map, 4, 10, 4), K_INVALID_OFFSET);
         assert_eq!(read_target_index(&image, map, 4, 10, 2), 108);
+    }
+}
+
+#[cfg(test)]
+mod opcode_family_tests {
+    use super::*;
+
+    #[test]
+    fn ranged_opcode_families_use_canonical_start() {
+        let insns = [
+            0x54u8, 0x00, 0x00, 0x00, // iget-object (family 0x52)
+            0x70, 0x00, 0x00, 0x00, 0x00, 0x00, // invoke-direct (family 0x6E)
+            0x33, 0x00, 0x00, 0x00, // cmpg-float (family 0x32)
+            0x39, 0x00, 0x00, 0x00, // if-ne (family 0x38)
+        ];
+        let mut image = vec![0u8; CODE_ITEM_HEADER + insns.len()];
+        image[12..16].copy_from_slice(&((insns.len() / 2) as u32).to_le_bytes());
+        image[CODE_ITEM_HEADER..].copy_from_slice(&insns);
+        let values = parse_instructions(&image, 0).unwrap();
+        let opcodes: Vec<u8> = values.iter().map(|v| v.opcode).collect();
+        assert_eq!(opcodes, vec![0x52, 0x6E, 0x32, 0x38]);
+        assert!(filter_location(CodeFilter::Field, values[0]).is_some());
+        assert!(filter_location(CodeFilter::Method, values[1]).is_some());
+        assert!(filter_location(CodeFilter::Rel16, values[2]).is_some());
+        assert!(filter_location(CodeFilter::Rel16, values[3]).is_some());
     }
 }

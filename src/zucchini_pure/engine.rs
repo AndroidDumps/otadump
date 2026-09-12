@@ -611,12 +611,208 @@ impl OffsetMapper {
     }
 }
 
+/// Reproduces the permutation produced by libstdc++'s `std::sort` when the
+/// comparator only orders by `src_offset`.
+///
+/// Zucchini's reference-delta stream is generated with the native OffsetMapper,
+/// whose `PruneEquivalencesAndSortBySource` calls `std::sort`. `std::sort` is
+/// not stable, and the pruning is order-sensitive for equivalences that share a
+/// `src_offset` (their post-prune order determines which one a projection
+/// picks). A stable Rust sort produces a different projection and diverges from
+/// native output, so the exact native permutation must be reproduced. This is
+/// a direct port of libstdc++ `__introsort_loop` / `__final_insertion_sort`
+/// with the `__partial_sort` heap fallback.
+#[allow(clippy::many_single_char_names)]
+mod stdcpp {
+    use super::Equivalence;
+
+    const THRESHOLD: usize = 16;
+
+    #[inline]
+    fn comp(a: &Equivalence, b: &Equivalence) -> bool {
+        a.src_offset < b.src_offset
+    }
+
+    fn lg(n: usize) -> u32 {
+        (usize::BITS - 1) - n.leading_zeros()
+    }
+
+    fn move_median_to_first(v: &mut [Equivalence], result: usize, a: usize, b: usize, c: usize) {
+        if comp(&v[a], &v[b]) {
+            if comp(&v[b], &v[c]) {
+                v.swap(result, b);
+            } else if comp(&v[a], &v[c]) {
+                v.swap(result, c);
+            } else {
+                v.swap(result, a);
+            }
+        } else if comp(&v[a], &v[c]) {
+            v.swap(result, a);
+        } else if comp(&v[b], &v[c]) {
+            v.swap(result, c);
+        } else {
+            v.swap(result, b);
+        }
+    }
+
+    fn unguarded_partition(
+        v: &mut [Equivalence],
+        mut first: usize,
+        mut last: usize,
+        pivot: usize,
+    ) -> usize {
+        loop {
+            while comp(&v[first], &v[pivot]) {
+                first += 1;
+            }
+            last -= 1;
+            while comp(&v[pivot], &v[last]) {
+                last -= 1;
+            }
+            if first >= last {
+                return first;
+            }
+            v.swap(first, last);
+            first += 1;
+        }
+    }
+
+    fn unguarded_partition_pivot(v: &mut [Equivalence], first: usize, last: usize) -> usize {
+        let mid = first + (last - first) / 2;
+        move_median_to_first(v, first, first + 1, mid, last - 1);
+        unguarded_partition(v, first + 1, last, first)
+    }
+
+    fn unguarded_linear_insert(v: &mut [Equivalence], mut last: usize) {
+        let value = v[last];
+        let mut next = last - 1;
+        while comp(&value, &v[next]) {
+            v[last] = v[next];
+            last = next;
+            next -= 1;
+        }
+        v[last] = value;
+    }
+
+    fn insertion_sort(v: &mut [Equivalence], first: usize, last: usize) {
+        if first == last {
+            return;
+        }
+        for i in (first + 1)..last {
+            if comp(&v[i], &v[first]) {
+                let value = v[i];
+                let mut j = i;
+                while j > first {
+                    v[j] = v[j - 1];
+                    j -= 1;
+                }
+                v[first] = value;
+            } else {
+                unguarded_linear_insert(v, i);
+            }
+        }
+    }
+
+    fn unguarded_insertion_sort(v: &mut [Equivalence], first: usize, last: usize) {
+        for i in first..last {
+            unguarded_linear_insert(v, i);
+        }
+    }
+
+    fn final_insertion_sort(v: &mut [Equivalence], first: usize, last: usize) {
+        if last - first > THRESHOLD {
+            insertion_sort(v, first, first + THRESHOLD);
+            unguarded_insertion_sort(v, first + THRESHOLD, last);
+        } else {
+            insertion_sort(v, first, last);
+        }
+    }
+
+    fn push_heap(v: &mut [Equivalence], mut hole: usize, top: usize, value: Equivalence) {
+        let mut parent = (hole - 1) / 2;
+        while hole > top && comp(&v[parent], &value) {
+            v[hole] = v[parent];
+            hole = parent;
+            parent = (hole - 1) / 2;
+        }
+        v[hole] = value;
+    }
+
+    fn adjust_heap(v: &mut [Equivalence], mut hole: usize, len: usize, value: Equivalence) {
+        let top = hole;
+        let mut second = hole;
+        while second < (len - 1) / 2 {
+            second = 2 * (second + 1);
+            if comp(&v[second], &v[second - 1]) {
+                second -= 1;
+            }
+            v[hole] = v[second];
+            hole = second;
+        }
+        if len & 1 == 0 && second == (len - 2) / 2 {
+            second = 2 * (second + 1);
+            v[hole] = v[second - 1];
+            hole = second - 1;
+        }
+        push_heap(v, hole, top, value);
+    }
+
+    fn pop_heap(v: &mut [Equivalence], last: usize) {
+        // [0, last) is the heap; `last` is the element being removed.
+        let value = v[last];
+        v[last] = v[0];
+        adjust_heap(&mut v[..last], 0, last, value);
+    }
+
+    fn heapsort(v: &mut [Equivalence]) {
+        if v.len() < 2 {
+            return;
+        }
+        let len = v.len();
+        let mut parent = (len - 2) / 2;
+        loop {
+            let value = v[parent];
+            adjust_heap(v, parent, len, value);
+            if parent == 0 {
+                break;
+            }
+            parent -= 1;
+        }
+        let mut last = len;
+        while last > 1 {
+            last -= 1;
+            pop_heap(v, last);
+        }
+    }
+
+    fn introsort_loop(v: &mut [Equivalence], first: usize, mut last: usize, mut depth: u32) {
+        while last - first > THRESHOLD {
+            if depth == 0 {
+                heapsort(&mut v[first..last]);
+                return;
+            }
+            depth -= 1;
+            let cut = unguarded_partition_pivot(v, first, last);
+            introsort_loop(v, cut, last, depth);
+            last = cut;
+        }
+    }
+
+    pub(super) fn sort_by_src(v: &mut [Equivalence]) {
+        let n = v.len();
+        if n > 1 {
+            introsort_loop(v, 0, n, lg(n) * 2);
+            final_insertion_sort(v, 0, n);
+        }
+    }
+}
+
 /// Mirrors `OffsetMapper::PruneEquivalencesAndSortBySource`.
 struct PruneEquivalencesAndSortBySource;
 
 impl PruneEquivalencesAndSortBySource {
     fn prune(equivalences: &mut Vec<Equivalence>) {
-        equivalences.sort_by_key(|equivalence| equivalence.src_offset);
+        stdcpp::sort_by_src(equivalences);
 
         let mut current = 0usize;
         while current < equivalences.len() {
@@ -762,3 +958,34 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod native_sort_tests {
+    use super::*;
+
+    /// Guards the libstdc++ `std::sort` port: the native permutation of
+    /// equal-`src_offset` equivalences is what the reference-delta stream
+    /// depends on, so the expected order below was produced by compiling
+    /// `PruneEquivalencesAndSortBySource`'s `std::sort` comparator with
+    /// libstdc++ on this 48-element tie-heavy input.
+    #[test]
+    fn sort_reproduces_native_tie_order() {
+        let input: [(u32, u32, u32); 48] = [(0, 1000, 1), (5, 1001, 2), (10, 1002, 3), (15, 1003, 4), (6, 1004, 5), (11, 1005, 1), (16, 1006, 2), (4, 1007, 3), (12, 1008, 4), (0, 1009, 5), (5, 1010, 1), (10, 1011, 2), (1, 1012, 3), (6, 1013, 4), (11, 1014, 5), (16, 1015, 1), (7, 1016, 2), (12, 1017, 3), (0, 1018, 4), (5, 1019, 5), (13, 1020, 1), (1, 1021, 2), (6, 1022, 3), (11, 1023, 4), (2, 1024, 5), (7, 1025, 1), (12, 1026, 2), (0, 1027, 3), (8, 1028, 4), (13, 1029, 5), (1, 1030, 1), (6, 1031, 2), (14, 1032, 3), (2, 1033, 4), (7, 1034, 5), (12, 1035, 1), (3, 1036, 2), (8, 1037, 3), (13, 1038, 4), (1, 1039, 5), (9, 1040, 1), (14, 1041, 2), (2, 1042, 3), (7, 1043, 4), (15, 1044, 5), (3, 1045, 1), (8, 1046, 2), (13, 1047, 3)];
+        let expected: [(u32, u32, u32); 48] = [(0, 1000, 1), (0, 1009, 5), (0, 1027, 3), (0, 1018, 4), (1, 1039, 5), (1, 1030, 1), (1, 1012, 3), (1, 1021, 2), (2, 1042, 3), (2, 1033, 4), (2, 1024, 5), (3, 1045, 1), (3, 1036, 2), (4, 1007, 3), (5, 1001, 2), (5, 1019, 5), (5, 1010, 1), (6, 1004, 5), (6, 1031, 2), (6, 1022, 3), (6, 1013, 4), (7, 1025, 1), (7, 1016, 2), (7, 1043, 4), (7, 1034, 5), (8, 1037, 3), (8, 1028, 4), (8, 1046, 2), (9, 1040, 1), (10, 1011, 2), (10, 1002, 3), (11, 1014, 5), (11, 1023, 4), (11, 1005, 1), (12, 1008, 4), (12, 1035, 1), (12, 1017, 3), (12, 1026, 2), (13, 1047, 3), (13, 1038, 4), (13, 1029, 5), (13, 1020, 1), (14, 1041, 2), (14, 1032, 3), (15, 1003, 4), (15, 1044, 5), (16, 1006, 2), (16, 1015, 1)];
+        let mut values: Vec<Equivalence> = input
+            .iter()
+            .map(|&(src_offset, dst_offset, length)| Equivalence {
+                src_offset,
+                dst_offset,
+                length,
+            })
+            .collect();
+        stdcpp::sort_by_src(&mut values);
+        let got: Vec<(u32, u32, u32)> = values
+            .iter()
+            .map(|e| (e.src_offset, e.dst_offset, e.length))
+            .collect();
+        assert_eq!(got, expected);
+    }
+}
+

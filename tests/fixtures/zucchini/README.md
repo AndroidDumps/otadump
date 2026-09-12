@@ -30,3 +30,24 @@ brotli --quality=9 --lgwin=20 --stdout input.zuc > input.zuc.br
 
 `malformed-zucchini.zuc.br` is the same Brotli encoding of the ASCII bytes `not a zucchini patch`.
 `malformed-brotli.zuc.br` contains the ASCII bytes `not a Brotli stream` followed by a newline and is intentionally not a Brotli stream.
+
+## Realistic DEX differential fixture
+
+`annotation-jvm-{old,new}.dex` + `annotation-jvm.zuc` are a small but complete
+real-world differential case: AndroidX `annotation-jvm` 1.8.1 -> 1.10.0
+`classes.dex` (28,568 -> 29,516 bytes), patched with the AOSP
+`external/zucchini` generator from the same pinned commits listed above.
+
+It is deliberately kept because it exercises two apply-path behaviours that the
+hand-built fixtures do not:
+
+- ranged Dalvik opcode families (`iget`/`iput`, `invoke-kind`, `cmp`/`if`),
+  whose native filters match the canonical range-start opcode rather than the
+  raw byte; and
+- the libstdc++ `std::sort` tie order inside
+  `PruneEquivalencesAndSortBySource`, on which the reference-delta stream
+  depends for equivalences that share a `src_offset`.
+
+The pure-Rust engine failed to apply this patch until both behaviours were
+ported, so it is a compact regression guard (161 equivalences, 2,044 reference
+deltas) that runs in milliseconds.
