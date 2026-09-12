@@ -156,3 +156,20 @@ fn native_status(status: i32) -> Status {
         status => Status::Unknown(status),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_with_cancel_reports_cancelled() {
+        let error = apply_with_cancel(b"abcd", b"not a patch", 5, || true).unwrap_err();
+        assert_eq!(error.status(), Status::Cancelled);
+    }
+
+    #[test]
+    fn apply_reports_invalid_patch_when_not_cancelled() {
+        let error = apply_with_cancel(b"abcd", b"not a patch", 5, || false).unwrap_err();
+        assert_eq!(error.status(), Status::InvalidPatch);
+    }
+}
