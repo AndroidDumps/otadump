@@ -28,6 +28,9 @@ class ArtifactTest(unittest.TestCase):
             ):
                 executable = _artifact.executable()
                 self.assertTrue(os.access(executable, os.X_OK))
+                executable.write_bytes(b"tampered")
+                repaired = _artifact.executable()
+                self.assertEqual(repaired.read_bytes(), data)
                 bundle.unlink()
                 self.assertEqual(_artifact.executable(), executable)
 

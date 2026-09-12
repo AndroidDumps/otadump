@@ -48,8 +48,13 @@ def extract(
         raise OtaDumpError(f"payload does not exist: {payload}")
     output.mkdir(parents=True, exist_ok=True)
 
+    try:
+        executable = _artifact.executable()
+    except _artifact.ArtifactError as error:
+        raise OtaDumpError(str(error)) from error
+
     command = [
-        str(_artifact.executable()),
+        str(executable),
         f"--payload={payload}",
         f"--output_dir={output}",
     ]
@@ -61,6 +66,8 @@ def extract(
             raise OtaDumpError(f"source directory does not exist: {source}")
         command.append(f"--input_dir={source}")
     if partitions is not None:
+        if isinstance(partitions, (str, bytes)):
+            raise TypeError("partitions must be an iterable of partition names")
         selected = list(partitions)
         if not selected or any(not name or "," in name for name in selected):
             raise ValueError("partitions must contain non-empty names without commas")

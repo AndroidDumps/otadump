@@ -45,6 +45,7 @@ def _runtime_valid(runtime: Path, expected: dict[str, str]) -> bool:
 def executable() -> Path:
     if platform.system() != "Linux" or platform.machine() not in {"x86_64", "AMD64"}:
         raise ArtifactError("otadump supports Linux x86_64 only")
+    import fcntl
 
     lock = _lock()
     runtime = _cache_root() / lock["bundle_sha256"]
@@ -53,34 +54,38 @@ def executable() -> Path:
         return binary
 
     runtime.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="otadump-", dir=runtime.parent) as temp_name:
-        temp = Path(temp_name)
-        bundle = temp / "runtime.zip"
-        try:
-            urllib.request.urlretrieve(lock["bundle_url"], bundle)
-        except OSError as error:
-            raise ArtifactError(f"could not download AOSP ota_extractor: {error}") from error
-        if _sha256(bundle) != lock["bundle_sha256"]:
-            raise ArtifactError("AOSP ota_extractor bundle checksum mismatch")
+    with (runtime.parent / ".install.lock").open("w") as install_lock:
+        fcntl.flock(install_lock, fcntl.LOCK_EX)
+        if _runtime_valid(runtime, lock["files"]):
+            return binary
+        if runtime.exists():
+            shutil.rmtree(runtime)
 
-        unpacked = temp / "runtime"
-        unpacked.mkdir()
-        with zipfile.ZipFile(bundle) as archive:
-            if set(archive.namelist()) != set(lock["files"]):
-                raise ArtifactError("AOSP ota_extractor bundle contents do not match lock")
-            for name, expected_hash in lock["files"].items():
-                target = unpacked / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(name) as source, target.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
-                if _sha256(target) != expected_hash:
-                    raise ArtifactError(f"AOSP runtime checksum mismatch: {name}")
+        with tempfile.TemporaryDirectory(prefix="otadump-", dir=runtime.parent) as temp_name:
+            temp = Path(temp_name)
+            bundle = temp / "runtime.zip"
+            try:
+                urllib.request.urlretrieve(lock["bundle_url"], bundle)
+            except OSError as error:
+                raise ArtifactError(f"could not download AOSP ota_extractor: {error}") from error
+            if _sha256(bundle) != lock["bundle_sha256"]:
+                raise ArtifactError("AOSP ota_extractor bundle checksum mismatch")
 
-        (unpacked / "bin" / "ota_extractor").chmod(0o755)
-        try:
+            unpacked = temp / "runtime"
+            unpacked.mkdir()
+            with zipfile.ZipFile(bundle) as archive:
+                if set(archive.namelist()) != set(lock["files"]):
+                    raise ArtifactError("AOSP ota_extractor bundle contents do not match lock")
+                for name, expected_hash in lock["files"].items():
+                    target = unpacked / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(name) as source, target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination)
+                    if _sha256(target) != expected_hash:
+                        raise ArtifactError(f"AOSP runtime checksum mismatch: {name}")
+
+            (unpacked / "bin" / "ota_extractor").chmod(0o755)
             unpacked.rename(runtime)
-        except FileExistsError:
-            pass
 
     if not _runtime_valid(runtime, lock["files"]):
         raise ArtifactError("AOSP ota_extractor cache installation failed")

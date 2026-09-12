@@ -63,6 +63,17 @@ class ExtractTest(unittest.TestCase):
         with self.assertRaisesRegex(otadump.OtaDumpError, "bad manifest"):
             otadump.extract(self.payload, self.root / "output")
 
+    @mock.patch("otadump._extract._artifact.executable")
+    def test_artifact_failure_is_public_error(self, executable):
+        executable.side_effect = otadump._extract._artifact.ArtifactError("unsupported")
+        with self.assertRaisesRegex(otadump.OtaDumpError, "unsupported"):
+            otadump.extract(self.payload, self.root / "output")
+
+    @mock.patch("otadump._extract._artifact.executable", return_value=Path("/tool"))
+    def test_partition_name_is_not_treated_as_iterable(self, _executable):
+        with self.assertRaises(TypeError):
+            otadump.extract(self.payload, self.root / "output", partitions="boot")
+
     def test_missing_inputs_fail_before_artifact_download(self):
         with self.assertRaisesRegex(otadump.OtaDumpError, "payload does not exist"):
             otadump.extract(self.root / "missing", self.root / "output")
