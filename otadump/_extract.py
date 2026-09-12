@@ -68,9 +68,13 @@ def extract(
     try:
         result = subprocess.run(command, text=True, capture_output=True, check=False)
     except OSError as error:
-        raise OtaDumpError(f"could not start LineageOS ota_extractor: {error}") from error
+        raise OtaDumpError(
+            f"could not start LineageOS ota_extractor: {error}"
+        ) from error
     if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        detail = (
+            result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        )
         raise OtaDumpError(
             f"LineageOS ota_extractor failed with status {result.returncode}: {detail}"
         )

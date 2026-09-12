@@ -49,7 +49,13 @@ class ExtractTest(unittest.TestCase):
         otadump.extract(ota, self.root / "output")
 
         command = run.call_args.args[0]
-        offset = int(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--payload_offset=")))
+        offset = int(
+            next(
+                arg.split("=", 1)[1]
+                for arg in command
+                if arg.startswith("--payload_offset=")
+            )
+        )
         with ota.open("rb") as stream:
             stream.seek(offset)
             self.assertEqual(stream.read(4), b"CrAU")

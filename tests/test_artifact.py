@@ -20,8 +20,9 @@ class ArtifactTest(unittest.TestCase):
                 "size": download.stat().st_size,
             }
             cache = root / "cache"
-            with mock.patch.object(_artifact, "_lock", return_value=lock), mock.patch.dict(
-                os.environ, {"OTADUMP_CACHE_DIR": str(cache)}
+            with (
+                mock.patch.object(_artifact, "_lock", return_value=lock),
+                mock.patch.dict(os.environ, {"OTADUMP_CACHE_DIR": str(cache)}),
             ):
                 executable = _artifact.executable()
                 self.assertTrue(os.access(executable, os.X_OK))

@@ -50,8 +50,13 @@ def executable() -> Path:
         try:
             urllib.request.urlretrieve(lock["url"], download)
         except OSError as error:
-            raise ArtifactError(f"could not download LineageOS ota_extractor: {error}") from error
-        if download.stat().st_size != lock["size"] or _sha256(download) != lock["sha256"]:
+            raise ArtifactError(
+                f"could not download LineageOS ota_extractor: {error}"
+            ) from error
+        if (
+            download.stat().st_size != lock["size"]
+            or _sha256(download) != lock["sha256"]
+        ):
             raise ArtifactError("LineageOS ota_extractor checksum mismatch")
         download.chmod(0o755)
         download.replace(binary)
