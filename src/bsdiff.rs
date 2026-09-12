@@ -12,7 +12,7 @@
 
 use std::io::Read;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 
 enum Algorithm {
     None,
@@ -21,6 +21,22 @@ enum Algorithm {
 }
 
 type ParsedPatch = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
+
+pub fn validate_output_len(patch: &[u8], expected: usize) -> Result<()> {
+    ensure!(patch.len() >= 32, "Patch data too short");
+    ensure!(
+        &patch[..8] == b"BSDIFF40" || &patch[..5] == b"BSDF2",
+        "Invalid BSDIFF/BSDF2 magic header"
+    );
+    let encoded = u64::from_le_bytes(
+        patch[24..32].try_into().map_err(|_| anyhow!("Invalid BSDIFF output length field"))?,
+    );
+    ensure!(encoded & (1 << 63) == 0, "Negative output length in patch header");
+    let actual =
+        usize::try_from(encoded).map_err(|_| anyhow!("Patch output length is too large"))?;
+    ensure!(actual == expected, "Patch output length mismatch: expected {expected}, got {actual}");
+    Ok(())
+}
 
 fn algorithm_from_byte(value: u8) -> Result<Algorithm> {
     match value {

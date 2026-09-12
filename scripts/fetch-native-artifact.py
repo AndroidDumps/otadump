@@ -174,6 +174,24 @@ def download_archive(url: str, archive_path: pathlib.Path) -> None:
     pathlib.Path(temp_name).replace(archive_path)
 
 
+def publish_tree(source: pathlib.Path, out_dir: pathlib.Path, checksums: dict[str, str]) -> int:
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = out_dir.with_name(f"{out_dir.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    if staging.exists():
+        shutil.rmtree(staging)
+    shutil.copytree(source, staging)
+    try:
+        os.replace(staging, out_dir)
+    except OSError:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if out_dir.is_dir():
+            verify_tree(out_dir, checksums)
+            return 0
+        raise
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle-lock", required=True)
@@ -203,21 +221,7 @@ def main() -> int:
         preseed_path = pathlib.Path(preseed)
         if preseed_path.is_dir():
             verify_tree(preseed_path, checksums)
-            out_dir.parent.mkdir(parents=True, exist_ok=True)
-            staging = out_dir.with_name(f"{out_dir.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
-            if staging.exists():
-                shutil.rmtree(staging)
-            shutil.copytree(preseed_path, staging)
-            try:
-                os.replace(staging, out_dir)
-            except OSError:
-                if staging.exists():
-                    shutil.rmtree(staging)
-                if out_dir.is_dir():
-                    verify_tree(out_dir, checksums)
-                    return 0
-                raise
-            return 0
+            return publish_tree(preseed_path, out_dir, checksums)
         if not preseed_path.is_file():
             raise RuntimeError(f"OTADUMP_NATIVE_PRESEED path does not exist: {preseed_path}")
 
@@ -246,20 +250,7 @@ def main() -> int:
             raise RuntimeError(f"missing artifact root after extraction: {bundle_lock['extract_root']}")
         verify_tree(extracted, checksums)
 
-        out_dir.parent.mkdir(parents=True, exist_ok=True)
-        staging = out_dir.with_name(f"{out_dir.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
-        if staging.exists():
-            shutil.rmtree(staging)
-        shutil.copytree(extracted, staging)
-        try:
-            os.replace(staging, out_dir)
-        except OSError:
-            if staging.exists():
-                shutil.rmtree(staging)
-            if out_dir.is_dir():
-                verify_tree(out_dir, checksums)
-                return 0
-            raise
+        return publish_tree(extracted, out_dir, checksums)
 
     return 0
 

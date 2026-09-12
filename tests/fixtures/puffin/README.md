@@ -5,10 +5,10 @@ The source files are `src/unittest_common.cc` and `src/patching_unittest.cc`.
 
 - `deflates-sample1.bin` is `kDeflatesSample1`.
 - `deflates-sample2.bin` is `kDeflatesSample2`.
-- `patch-1-to-2.puf` is `kPatch1To2`.
 - `patch-1-to-2-zucchini.puf` reconstructs `deflates-sample2.bin` from `deflates-sample1.bin` through three actual deflate streams on each side.
-- `patch-1-to-raw.puf` is `kPatch1ToNoDeflate`.
-- `raw-11-22-33-44.bin` is the expected output declared by `Patching1ToNoDeflateTest`.
+
+Only these three fixture payloads are retained because they are the minimal set
+needed by the product-contract PUFFDIFF/ZUCCHINI extraction test.
 
 The files retain Puffin's BSD-3-Clause license in `LICENSE` and Zucchini's BSD-3-Clause license in `LICENSE.zucchini`.
 Verify them with `sha256sum -c SHA256SUMS` from this directory.

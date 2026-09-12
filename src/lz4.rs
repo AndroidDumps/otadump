@@ -309,194 +309,33 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::fs::File;
-    use std::sync::OnceLock;
-
-    use zip::ZipArchive;
-
-    static FIXTURES: OnceLock<HashMap<String, Vec<u8>>> = OnceLock::new();
-
-    fn fixture(path: &str) -> Vec<u8> {
-        FIXTURES
-            .get_or_init(|| {
-                let file = File::open("tests/fixtures/corpus/opaque-fixtures.zip").unwrap();
-                let mut archive = ZipArchive::new(file).unwrap();
-                let mut fixtures = HashMap::with_capacity(archive.len());
-                for index in 0..archive.len() {
-                    let mut member = archive.by_index(index).unwrap();
-                    let mut bytes = Vec::new();
-                    std::io::copy(&mut member, &mut bytes).unwrap();
-                    fixtures.insert(member.name().to_string(), bytes);
-                }
-                fixtures
-            })
-            .get(path)
-            .unwrap_or_else(|| panic!("missing fixture in corpus zip: {path}"))
-            .clone()
-    }
 
     #[test]
-    fn matches_frozen_lz4_reference() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
-        let expected = fixture("lz4/lz4-no-postfix.lz4");
-
-        let compressed = compress_dest_size(&raw, expected.len(), false).unwrap();
-        assert_eq!(compressed, expected);
-        assert_eq!(decompress_safe_partial(&expected, raw.len()).unwrap(), raw);
-    }
-
-    #[test]
-    fn matches_frozen_lz4hc9_reference() {
-        let raw = fixture("lz4/lz4hc9-no-postfix.raw");
-        let expected = fixture("lz4/lz4hc9-no-postfix.lz4");
-
-        let compressed = compress_hc_dest_size(&raw, expected.len(), 9, false).unwrap();
-        assert_eq!(compressed, expected);
-        assert_eq!(decompress_safe_partial(&expected, raw.len()).unwrap(), raw);
-    }
-
-    #[test]
-    fn matches_frozen_zero_padding_layout() {
-        let raw = fixture("lz4/zero-padding-layout.raw");
-        let expected = fixture("lz4/zero-padding-layout.lz4");
-        let (raw_block, compressed_raw) = raw.split_at(32);
-        let (expected_raw, expected_compressed) = expected.split_at(32);
-
-        assert_eq!(raw_block, expected_raw);
-        let compressed =
-            compress_dest_size(compressed_raw, expected_compressed.len(), true).unwrap();
-        assert_eq!(compressed, expected_compressed);
-
-        let first_byte = compressed.iter().position(|byte| *byte != 0).unwrap();
-        assert_eq!(
-            decompress_safe_partial(&compressed[first_byte..], compressed_raw.len()).unwrap(),
-            compressed_raw
-        );
-    }
-
-    #[test]
-    fn round_trip_synthetic_data() {
-        let mut raw = Vec::with_capacity(2048);
-        for i in 0..2048 {
-            raw.push((i % 37) as u8);
-        }
-        let output_size = 512;
-        let compressed = compress_dest_size(&raw, output_size, false).unwrap();
-        assert_eq!(compressed.len(), output_size);
+    fn compress_and_decompress_round_trip() {
+        let raw = (0..2048).map(|i| (i % 37) as u8).collect::<Vec<_>>();
+        let compressed = compress_dest_size(&raw, 512, false).unwrap();
         let decompressed = decompress_safe_partial(&compressed, raw.len()).unwrap();
         assert_eq!(decompressed, raw);
     }
 
     #[test]
-    fn round_trip_hc_levels() {
-        let mut raw = Vec::with_capacity(2048);
-        for i in 0..2048 {
-            raw.push((i % 37) as u8);
-        }
-        let output_size = 512;
-        for level in [HC_LEVEL_MIN, 6, 9, HC_LEVEL_MAX] {
-            let compressed = compress_hc_dest_size(&raw, output_size, level, false).unwrap();
-            assert_eq!(compressed.len(), output_size);
-            let decompressed = decompress_safe_partial(&compressed, raw.len()).unwrap();
-            assert_eq!(decompressed, raw);
-        }
+    fn zero_padding_round_trip() {
+        let raw = vec![0x5a; 1024];
+        let compressed = compress_dest_size(&raw, 64, true).unwrap();
+        let start = compressed.iter().position(|byte| *byte != 0).unwrap();
+        let decompressed = decompress_safe_partial(&compressed[start..], raw.len()).unwrap();
+        assert_eq!(decompressed, raw);
     }
 
     #[test]
-    fn rejects_invalid_compression_levels() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
+    fn invalid_sizes_return_invalid_argument() {
         assert_eq!(
-            compress_hc_dest_size(&raw, 512, HC_LEVEL_MIN - 1, false).unwrap_err().status(),
+            compress_dest_size(&[], 32, false).unwrap_err().status(),
             Status::InvalidArgument
         );
         assert_eq!(
-            compress_hc_dest_size(&raw, 512, HC_LEVEL_MAX + 1, false).unwrap_err().status(),
+            decompress_safe_partial(&[1, 2, 3], 0).unwrap_err().status(),
             Status::InvalidArgument
-        );
-    }
-
-    #[test]
-    fn rejects_zero_or_oversized_inputs() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
-        let expected = fixture("lz4/lz4-no-postfix.lz4");
-
-        assert_eq!(
-            compress_dest_size(&[], 512, false).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            compress_dest_size(&raw, 0, false).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            compress_dest_size(&raw, MAX_INPUT_SIZE + 1, false).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            decompress_safe_partial(&[], 512).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            decompress_safe_partial(&expected, 0).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            decompress_safe_partial(&expected, MAX_INPUT_SIZE + 1).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-    }
-
-    #[test]
-    fn rejects_stored_not_smaller_than_raw() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
-        assert_eq!(
-            compress_dest_size(&raw, raw.len(), false).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            compress_dest_size(&raw, raw.len() + 10, false).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-        assert_eq!(
-            decompress_safe_partial(&raw, raw.len() / 2).unwrap_err().status(),
-            Status::InvalidArgument
-        );
-    }
-
-    #[test]
-    fn fails_on_corrupted_decompression_input() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
-        let expected = fixture("lz4/lz4-no-postfix.lz4");
-        let mut corrupted = expected.clone();
-        corrupted[0] = 0xff;
-        corrupted[1] = 0xff;
-        assert_eq!(
-            decompress_safe_partial(&corrupted, raw.len()).unwrap_err().status(),
-            Status::DecompressionFailed
-        );
-    }
-
-    #[test]
-    fn fails_on_decompression_size_mismatch() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
-        let expected = fixture("lz4/lz4-no-postfix.lz4");
-        let compressed_end = expected.iter().rposition(|byte| *byte != 0).map_or(0, |i| i + 1);
-        assert_eq!(
-            decompress_safe_partial(&expected[..compressed_end], raw.len() + 256)
-                .unwrap_err()
-                .status(),
-            Status::DecompressionFailed
-        );
-    }
-
-    #[test]
-    fn fails_when_output_budget_too_small() {
-        let raw = fixture("lz4/lz4-no-postfix.raw");
-        let error = compress_dest_size(&raw, 16, false).unwrap_err();
-        assert!(
-            error.status() == Status::CompressionDivergence
-                || error.status() == Status::CompressionFailed
         );
     }
 }

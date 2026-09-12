@@ -5,9 +5,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use prost::Message as _;
 use ring::digest;
 
-use crate::{
-    CancellationToken, is_cancellation, lz4, puffin, validate_bsdiff_output_len, zucchini,
-};
+use crate::{CancellationToken, bsdiff, is_cancellation, lz4, puffin, zucchini};
 
 const MAGIC: &[u8; 7] = b"LZ4DIFF";
 const FRAMING_SIZE: usize = 16;
@@ -477,7 +475,7 @@ fn validate_info<'a>(
                     "LZ4DIFF destination block {index} postfix patch requires a SHA-256 hash"
                 );
                 ensure_below_bound(postfix_bspatch.len(), "postfix patch")?;
-                validate_bsdiff_output_len(postfix_bspatch, compressed_length)
+                bsdiff::validate_output_len(postfix_bspatch, compressed_length)
                     .with_context(|| format!("LZ4DIFF destination block {index} postfix patch"))?;
                 puffin::validate_bsdiff_resources(
                     postfix_bspatch,

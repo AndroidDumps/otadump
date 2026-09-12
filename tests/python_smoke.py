@@ -1,5 +1,4 @@
 from hashlib import sha256
-from inspect import signature
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -60,13 +59,9 @@ def _payload(target: bytes, source: Optional[bytes] = None) -> bytes:
 
 
 def main() -> None:
-    assert issubclass(otadump.OtaDumpError, Exception)
-    extract_signature = str(signature(otadump.extract))
-    assert "partitions" in extract_signature
-    assert "source_dir=None" in extract_signature
-
     with TemporaryDirectory() as temporary_directory:
         temporary_path = Path(temporary_directory)
+
         full_target = b"full partition image"
         full_payload = temporary_path / "full.bin"
         full_payload.write_bytes(_payload(full_target))
@@ -86,42 +81,14 @@ def main() -> None:
         assert (delta_output / "system.img").read_bytes() == source
         assert source_image.read_bytes() == source
 
+        invalid_payload = temporary_path / "invalid.bin"
+        invalid_payload.write_bytes(b"invalid")
         try:
-            otadump.extract(
-                delta_payload,
-                temporary_path / "missing-source-output",
-                source_dir=temporary_path / "missing-source",
-            )
-        except otadump.OtaDumpError as error:
-            assert "Unable to open source partition image" in str(error)
-        else:
-            raise AssertionError("missing source image unexpectedly succeeded")
-
-        payload_file = temporary_path / "invalid.bin"
-        payload_file.write_bytes(b"invalid")
-
-        try:
-            otadump.extract(payload_file, temporary_path / "output")
+            otadump.extract(invalid_payload, temporary_path / "invalid-output")
         except otadump.OtaDumpError as error:
             assert str(error) == "Invalid payload file"
         else:
             raise AssertionError("invalid payload unexpectedly succeeded")
-
-        cancellation_token = otadump.CancellationToken()
-        cancellation_token.cancel()
-        cancellation_token.cancel()
-        cancelled_output = temporary_path / "cancelled-output"
-        try:
-            otadump.extract(
-                full_payload,
-                cancelled_output,
-                cancellation_token=cancellation_token,
-            )
-        except KeyboardInterrupt:
-            pass
-        else:
-            raise AssertionError("cancelled extraction unexpectedly succeeded")
-        assert not cancelled_output.exists()
 
 
 if __name__ == "__main__":

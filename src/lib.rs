@@ -266,7 +266,6 @@ impl<'a> ExtractOptions<'a> {
                 let task = Task {
                     payload: &payload,
                     block_size,
-                    verify: self.verify,
                     update,
                     source,
                     op_idx: AtomicUsize::new(0),
@@ -728,8 +727,8 @@ fn extract_operation_data<'a>(payload: &'a Payload<'a>, op: &InstallOperation) -
     payload.data.get(offset..end).context("Data range exceeds payload size")
 }
 
-fn verify_hash(
-    data: &[u8],
+fn verify_hash_chunks<'a>(
+    chunks: impl IntoIterator<Item = &'a [u8]>,
     expected: Option<&[u8]>,
     label: &str,
     cancellation_token: &CancellationToken,
@@ -739,7 +738,7 @@ fn verify_hash(
         return Ok(());
     };
     let mut context = digest::Context::new(&digest::SHA256);
-    for chunk in data.chunks(VERIFY_CHUNK_SIZE) {
+    for chunk in chunks {
         cancellation_token.check()?;
         context.update(chunk);
     }
@@ -753,6 +752,15 @@ fn verify_hash(
     Ok(())
 }
 
+fn verify_hash(
+    data: &[u8],
+    expected: Option<&[u8]>,
+    label: &str,
+    cancellation_token: &CancellationToken,
+) -> Result<()> {
+    verify_hash_chunks(data.chunks(VERIFY_CHUNK_SIZE), expected, label, cancellation_token)
+}
+
 fn verify_hash_over_ranges(
     data: &[u8],
     ranges: &[Range<usize>],
@@ -760,25 +768,8 @@ fn verify_hash_over_ranges(
     label: &str,
     cancellation_token: &CancellationToken,
 ) -> Result<()> {
-    cancellation_token.check()?;
-    let Some(expected) = expected else {
-        return Ok(());
-    };
-    let mut context = digest::Context::new(&digest::SHA256);
-    for range in ranges {
-        for chunk in data[range.clone()].chunks(VERIFY_CHUNK_SIZE) {
-            cancellation_token.check()?;
-            context.update(chunk);
-        }
-    }
-    let actual = context.finish();
-    ensure!(
-        actual.as_ref() == expected,
-        "{label} hash mismatch: expected {}, got {}",
-        hex::encode(expected),
-        hex::encode(actual.as_ref())
-    );
-    Ok(())
+    let chunks = ranges.iter().flat_map(|range| data[range.clone()].chunks(VERIFY_CHUNK_SIZE));
+    verify_hash_chunks(chunks, expected, label, cancellation_token)
 }
 
 fn paths_alias(source: &Path, destination: &Path) -> Result<bool> {
@@ -824,7 +815,6 @@ impl Default for ExtractOptions<'_> {
 struct Task<'a> {
     payload: &'a Payload<'a>,
     block_size: usize,
-    verify: bool,
 
     update: &'a PartitionUpdate,
     source: Option<SourcePartition>,
@@ -992,16 +982,7 @@ impl Task<'_> {
         let output = zucchini::apply_with_cancel(&source, &patch, expected_output_len, || {
             self.cancellation_token.is_cancelled()
         })
-        .map_err(|error| {
-            // Preserve cooperative cancellation as a typed error so the
-            // extraction layer can unwind cleanly; anything else is a patch
-            // failure.
-            if error.status() == zucchini::Status::Cancelled {
-                anyhow::Error::new(ExtractionCancelled)
-            } else {
-                anyhow::anyhow!("ZUCCHINI apply failed: {error}")
-            }
-        })?;
+        .map_err(map_zucchini_apply_error)?;
         self.cancellation_token.check()?;
         self.write_exact(&output, dst_extents)
     }
@@ -1132,16 +1113,7 @@ impl Task<'_> {
     }
 
     fn extract_data<'a>(&'a self, op: &InstallOperation) -> Result<&'a [u8]> {
-        let data = extract_operation_data(self.payload, op)?;
-        self.verify_op(op, data)?;
-        Ok(data)
-    }
-
-    fn verify_op(&self, op: &InstallOperation, data: &[u8]) -> Result<()> {
-        if !self.verify {
-            return Ok(());
-        }
-        verify_hash(data, op.data_sha256_hash.as_deref(), "Input", self.cancellation_token)
+        extract_operation_data(self.payload, op)
     }
 
     fn increment_progress(&self) {
@@ -1155,6 +1127,14 @@ fn lz4diff_error(error: Error) -> Error {
     } else {
         let message = error.to_string();
         error.context(format!("Error in LZ4DIFF operation: {message}"))
+    }
+}
+
+fn map_zucchini_apply_error(error: zucchini::Error) -> Error {
+    if error.status() == zucchini::Status::Cancelled {
+        Error::new(ExtractionCancelled)
+    } else {
+        anyhow::anyhow!("ZUCCHINI apply failed: {error}")
     }
 }
 
@@ -1248,20 +1228,6 @@ fn increment_progress(
     }
 }
 
-fn validate_bsdiff_output_len(patch: &[u8], expected: usize) -> Result<()> {
-    ensure!(patch.len() >= 32, "Patch data too short");
-    ensure!(
-        &patch[..8] == b"BSDIFF40" || &patch[..5] == b"BSDF2",
-        "Invalid BSDIFF/BSDF2 magic header"
-    );
-    let encoded =
-        u64::from_le_bytes(patch[24..32].try_into().context("Invalid BSDIFF output length field")?);
-    ensure!(encoded & (1 << 63) == 0, "Negative output length in patch header");
-    let actual = usize::try_from(encoded).context("Patch output length is too large")?;
-    ensure!(actual == expected, "Patch output length mismatch: expected {expected}, got {actual}");
-    Ok(())
-}
-
 #[inline]
 fn offtin(buf: [u8; 8]) -> i64 {
     let y = i64::from_le_bytes(buf);
@@ -1274,7 +1240,7 @@ pub(crate) fn apply_bsdiff(
     expected_output_len: usize,
     cancellation_token: &CancellationToken,
 ) -> Result<Vec<u8>> {
-    validate_bsdiff_output_len(patch, expected_output_len)?;
+    bsdiff::validate_output_len(patch, expected_output_len)?;
     cancellation_token.check()?;
     puffin::validate_bsdiff_resources(patch, expected_output_len, cancellation_token)?;
     cancellation_token.check()?;

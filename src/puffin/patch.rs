@@ -401,6 +401,8 @@ fn validate_inner_bsdiff_resources(
     output_size: usize,
     cancellation_token: &CancellationToken,
 ) -> Result<()> {
+    crate::bsdiff::validate_output_len(patch, output_size)
+        .map_err(|error| Error::Bsdiff(error.to_string()))?;
     let header = patch
         .get(..32)
         .ok_or_else(|| Error::Bsdiff("patch data is shorter than 32 bytes".into()))?;
@@ -444,6 +446,14 @@ fn validate_inner_bsdiff_resources(
     validate_compressed_stream(algorithms[1], diff, output_size, "diff", cancellation_token)?;
     validate_compressed_stream(algorithms[2], extra, output_size, "extra", cancellation_token)?;
     Ok(())
+}
+
+fn map_cancelled_to_zucchini(error: anyhow::Error) -> Error {
+    if is_cancellation(error.as_ref()) {
+        Error::Cancelled(ExtractionCancelled)
+    } else {
+        Error::Zucchini(error.to_string())
+    }
 }
 
 pub(crate) fn validate_bsdiff_resources(
@@ -511,14 +521,8 @@ pub fn apply(
             }
         })?
     } else {
-        let zucchini_patch =
-            decode_zucchini_patch(raw_patch, cancellation_token).map_err(|error| {
-                if is_cancellation(error.as_ref()) {
-                    Error::Cancelled(ExtractionCancelled)
-                } else {
-                    Error::Zucchini(error.to_string())
-                }
-            })?;
+        let zucchini_patch = decode_zucchini_patch(raw_patch, cancellation_token)
+            .map_err(map_cancelled_to_zucchini)?;
         check_cancelled(cancellation_token)?;
         let destination =
             zucchini::apply(&puffed_source, &zucchini_patch, header.destination.puff_length)
