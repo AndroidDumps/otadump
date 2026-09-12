@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context as _, Result, bail, ensure};
-use bsdiff_android::patch_bsdf2;
 use prost::Message as _;
 use ring::digest;
 
-use crate::{CancellationToken, lz4, puffin, validate_bsdiff_output_len, zucchini};
+use crate::{
+    CancellationToken, is_cancellation, lz4, puffin, validate_bsdiff_output_len, zucchini,
+};
 
 const MAGIC: &[u8; 7] = b"LZ4DIFF";
 const FRAMING_SIZE: usize = 16;
@@ -580,26 +581,13 @@ fn apply_bsdiff(
     label: &str,
     cancellation_token: &CancellationToken,
 ) -> Result<Vec<u8>> {
-    validate_bsdiff_output_len(patch, output_size)
-        .with_context(|| format!("LZ4DIFF {label} patch is invalid"))?;
-    cancellation_token.check()?;
-    puffin::validate_bsdiff_resources(patch, output_size, cancellation_token).map_err(|error| {
-        preserve_puffin_error(error, &format!("LZ4DIFF {label} patch is invalid"))
-    })?;
-    cancellation_token.check()?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_size)
-        .with_context(|| format!("unable to allocate LZ4DIFF {label} output"))?;
-    patch_bsdf2(source, patch, &mut output)
-        .with_context(|| format!("LZ4DIFF {label} patch is invalid"))?;
-    cancellation_token.check()?;
-    ensure!(
-        output.len() == output_size,
-        "LZ4DIFF {label} output size mismatch: expected {output_size}, got {}",
-        output.len()
-    );
-    Ok(output)
+    crate::apply_bsdiff(source, patch, output_size, cancellation_token).map_err(|error| {
+        if is_cancellation(error.as_ref()) {
+            error
+        } else {
+            anyhow::anyhow!("LZ4DIFF {label} patch is invalid: {error}")
+        }
+    })
 }
 
 fn preserve_puffin_error(error: puffin::Error, context: &str) -> anyhow::Error {

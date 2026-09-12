@@ -25,7 +25,7 @@ use std::{error, result, slice, thread};
 
 use anyhow::{Context as _, Error, Result, bail, ensure};
 use brotli::Decompressor as BrotliDecoder;
-use bsdiff_android::patch_bsdf2;
+use bsdiff_android::parse_bsdf2_header;
 use bzip2::read::BzDecoder;
 use chromeos_update_engine::install_operation::Type;
 use chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
@@ -956,18 +956,14 @@ impl Task<'_> {
         let expected_output_len = dst_extents.iter().try_fold(0usize, |len, extent| {
             len.checked_add(extent.len()).context("Combined destination length overflow")
         })?;
-        validate_bsdiff_output_len(patch, expected_output_len)
-            .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
-        self.cancellation_token.check()?;
-        puffin::validate_bsdiff_resources(patch, expected_output_len, self.cancellation_token)
-            .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
-        self.cancellation_token.check()?;
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(expected_output_len)
-            .context("Unable to allocate patched output buffer")?;
-        patch_bsdf2(&source, patch, &mut output)
-            .map_err(|error| anyhow::anyhow!("{operation} patch is invalid: {error}"))?;
+        let output = apply_bsdiff(&source, patch, expected_output_len, self.cancellation_token)
+            .map_err(|error| {
+                if is_cancellation(error.as_ref()) {
+                    error
+                } else {
+                    anyhow::anyhow!("{operation} patch is invalid: {error}")
+                }
+            })?;
         self.cancellation_token.check()?;
         self.write_exact(&output, dst_extents)
     }
@@ -1253,6 +1249,111 @@ fn validate_bsdiff_output_len(patch: &[u8], expected: usize) -> Result<()> {
     let actual = usize::try_from(encoded).context("Patch output length is too large")?;
     ensure!(actual == expected, "Patch output length mismatch: expected {expected}, got {actual}");
     Ok(())
+}
+
+#[inline]
+fn offtin(buf: [u8; 8]) -> i64 {
+    let y = i64::from_le_bytes(buf);
+    if 0 == y & (1 << 63) { y } else { -(y & !(1 << 63)) }
+}
+
+pub(crate) fn apply_bsdiff(
+    source: &[u8],
+    patch: &[u8],
+    expected_output_len: usize,
+    cancellation_token: &CancellationToken,
+) -> Result<Vec<u8>> {
+    validate_bsdiff_output_len(patch, expected_output_len)?;
+    cancellation_token.check()?;
+    puffin::validate_bsdiff_resources(patch, expected_output_len, cancellation_token)?;
+    cancellation_token.check()?;
+
+    let (new_size, control_data, diff_data, extra_data) =
+        parse_bsdf2_header(patch).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let new_size = usize::try_from(new_size).context("Patch new_size is negative or overflows")?;
+    ensure!(
+        new_size == expected_output_len,
+        "Patch output length mismatch: expected {expected_output_len}, got {new_size}"
+    );
+
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(expected_output_len)
+        .context("Unable to allocate patched output buffer")?;
+
+    ensure!(control_data.len() % 24 == 0, "Invalid control data length (not a multiple of 24)");
+    let mut oldpos: i64 = 0;
+    let mut diff_pos: usize = 0;
+    let mut extra_pos: usize = 0;
+
+    for chunk in control_data.chunks_exact(24) {
+        cancellation_token.check()?;
+        let add_len = offtin(chunk[0..8].try_into().unwrap());
+        let copy_len = offtin(chunk[8..16].try_into().unwrap());
+        let seek_amount = offtin(chunk[16..24].try_into().unwrap());
+
+        ensure!(
+            add_len >= 0 && copy_len >= 0,
+            "Negative length in control tuple: add={add_len}, copy={copy_len}"
+        );
+        let add_len = usize::try_from(add_len).context("Control tuple add_len overflow")?;
+        let copy_len = usize::try_from(copy_len).context("Control tuple copy_len overflow")?;
+
+        let pending_len = add_len.checked_add(copy_len).context("Control tuple length overflow")?;
+        let target_len =
+            output.len().checked_add(pending_len).context("Patched output length overflow")?;
+        ensure!(
+            target_len <= expected_output_len,
+            "Control tuple would exceed expected output size"
+        );
+
+        if add_len > 0 {
+            let diff_end = diff_pos.checked_add(add_len).context("Diff stream offset overflow")?;
+            let diff_chunk = diff_data.get(diff_pos..diff_end).context("Diff stream exhausted")?;
+            for (i, &diff_byte) in diff_chunk.iter().enumerate() {
+                let offset = i64::try_from(i).context("Diff offset overflow")?;
+                let src_pos = oldpos.checked_add(offset).context("Source position overflow")?;
+                let old_byte = match usize::try_from(src_pos) {
+                    Ok(pos) if pos < source.len() => source[pos],
+                    _ => 0u8,
+                };
+                output.push(old_byte.wrapping_add(diff_byte));
+            }
+            let add_i64 = i64::try_from(add_len).context("Source position overflow")?;
+            oldpos = oldpos.checked_add(add_i64).context("Source position overflow")?;
+            diff_pos = diff_end;
+        }
+
+        if copy_len > 0 {
+            let extra_end =
+                extra_pos.checked_add(copy_len).context("Extra stream offset overflow")?;
+            let extra_chunk =
+                extra_data.get(extra_pos..extra_end).context("Extra stream exhausted")?;
+            output.extend_from_slice(extra_chunk);
+            extra_pos = extra_end;
+        }
+
+        oldpos = oldpos.checked_add(seek_amount).context("Source position overflow")?;
+    }
+
+    cancellation_token.check()?;
+    ensure!(
+        output.len() == expected_output_len,
+        "Patched output size mismatch: expected {expected_output_len}, got {}",
+        output.len()
+    );
+    ensure!(
+        diff_pos == diff_data.len(),
+        "Diff stream not fully consumed: used {diff_pos}/{}",
+        diff_data.len()
+    );
+    ensure!(
+        extra_pos == extra_data.len(),
+        "Extra stream not fully consumed: used {extra_pos}/{}",
+        extra_data.len()
+    );
+
+    Ok(output)
 }
 
 pub trait ProgressReporter: Sync {

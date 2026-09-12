@@ -11,8 +11,7 @@ use bzip2::read::BzDecoder;
 
 use crate::puffin::{BitExtent, ByteExtent, Error, Result, check_cancelled, stream};
 use crate::{
-    CancellationToken, ExtractionCancelled, decode_zucchini_patch, is_cancellation,
-    validate_bsdiff_output_len, zucchini,
+    CancellationToken, ExtractionCancelled, decode_zucchini_patch, is_cancellation, zucchini,
 };
 
 const MAGIC: &[u8; 4] = b"PUF1";
@@ -498,20 +497,19 @@ pub fn apply(
 
     check_cancelled(cancellation_token)?;
     let puffed_destination = if header.patch_type == PATCH_TYPE_BSDIFF {
-        validate_bsdiff_output_len(raw_patch, header.destination.puff_length)
-            .map_err(|error| Error::Bsdiff(error.to_string()))?;
-        validate_inner_bsdiff_resources(
+        crate::apply_bsdiff(
+            &puffed_source,
             raw_patch,
             header.destination.puff_length,
             cancellation_token,
-        )?;
-        let mut destination = Vec::new();
-        destination
-            .try_reserve_exact(header.destination.puff_length)
-            .map_err(|error| Error::Allocation(format!("puffed destination: {error}")))?;
-        bsdiff_android::patch_bsdf2(&puffed_source, raw_patch, &mut destination)
-            .map_err(|error| Error::Bsdiff(error.to_string()))?;
-        destination
+        )
+        .map_err(|error| {
+            if is_cancellation(error.as_ref()) {
+                Error::Cancelled(ExtractionCancelled)
+            } else {
+                Error::Bsdiff(error.to_string())
+            }
+        })?
     } else {
         let zucchini_patch =
             decode_zucchini_patch(raw_patch, cancellation_token).map_err(|error| {

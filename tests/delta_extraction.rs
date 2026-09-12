@@ -857,6 +857,81 @@ fn brotli_bsdiff_reconstructs_bsdf2_without_modifying_source() {
 }
 
 #[test]
+fn uncompressed_bsdf2_negative_seek_adds_diff_byte() {
+    let mut patch = Vec::new();
+    // BSDF2 magic + uncompressed flags (0 for control, diff, extra)
+    patch.extend_from_slice(b"BSDF2\x00\x00\x00");
+    patch.extend_from_slice(&72u64.to_le_bytes()); // control stream len: 3 tuples * 24
+    patch.extend_from_slice(&3u64.to_le_bytes()); // diff stream len: 3
+    patch.extend_from_slice(&3u64.to_le_bytes()); // new_size: 3
+
+    // Tuple 1: add=1, copy=0, seek=-2 (in-bounds source addition at oldpos=0; seek to -1)
+    patch.extend_from_slice(&1u64.to_le_bytes());
+    patch.extend_from_slice(&0u64.to_le_bytes());
+    let seek_neg2: u64 = 2 | (1 << 63); // offtin sign-magnitude -2
+    patch.extend_from_slice(&seek_neg2.to_le_bytes());
+
+    // Tuple 2: add=1, copy=0, seek=10 (negative oldpos=-1 treated as zero; seek to 10)
+    patch.extend_from_slice(&1u64.to_le_bytes());
+    patch.extend_from_slice(&0u64.to_le_bytes());
+    patch.extend_from_slice(&10u64.to_le_bytes());
+
+    // Tuple 3: add=1, copy=0, seek=0 (out-of-range oldpos=10 treated as zero)
+    patch.extend_from_slice(&1u64.to_le_bytes());
+    patch.extend_from_slice(&0u64.to_le_bytes());
+    patch.extend_from_slice(&0u64.to_le_bytes());
+
+    // Diff stream: 3 bytes
+    let diff_byte1: u8 = 0x01;
+    let diff_byte2: u8 = 0x42;
+    let diff_byte3: u8 = 0x24;
+    patch.push(diff_byte1);
+    patch.push(diff_byte2);
+    patch.push(diff_byte3);
+
+    let temporary = TempDir::new().unwrap();
+    let source_dir = temporary.path().join("source");
+    let output_dir = temporary.path().join("output");
+    fs::create_dir(&source_dir).unwrap();
+    let source = b"Z";
+    fs::write(source_dir.join("system.img"), source).unwrap();
+
+    let expected = [b'Z'.wrapping_add(diff_byte1), diff_byte2, diff_byte3];
+    let manifest = DeltaArchiveManifest {
+        block_size: Some(1),
+        minor_version: Some(4),
+        partitions: vec![PartitionUpdate {
+            partition_name: "system".into(),
+            old_partition_info: Some(partition_info(source)),
+            new_partition_info: Some(partition_info(&expected)),
+            operations: vec![InstallOperation {
+                operation_type: 5, // SOURCE_BSDIFF
+                data_offset: Some(0),
+                data_length: Some(patch.len() as u64),
+                src_extents: vec![extent(0, source.len() as u64)],
+                src_length: Some(source.len() as u64),
+                dst_extents: vec![extent(0, expected.len() as u64)],
+                dst_length: Some(expected.len() as u64),
+                data_sha256_hash: Some(sha256(&patch)),
+                src_sha256_hash: Some(sha256(source)),
+            }],
+            ..Default::default()
+        }],
+    };
+    let payload = temporary.path().join("payload.bin");
+    write_payload(&payload, manifest, &patch);
+
+    ExtractOptions::new()
+        .source_dir(&source_dir)
+        .num_threads(1)
+        .extract(&payload, &output_dir)
+        .unwrap();
+
+    assert_eq!(fs::read(output_dir.join("system.img")).unwrap(), expected);
+    assert_eq!(fs::read(source_dir.join("system.img")).unwrap(), source);
+}
+
+#[test]
 fn malformed_bsdiff_headers_fail_cleanly_and_remove_staging() {
     for (operation_type, patch, expected_error) in [
         (5, &[0; 32][..], "SOURCE_BSDIFF patch is invalid"),
