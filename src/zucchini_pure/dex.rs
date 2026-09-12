@@ -569,7 +569,7 @@ enum ItemMapper {
 
 #[derive(Clone, Copy)]
 enum ListMapper {
-    TargetIndex { map: MapItem, item_size: u32 },
+    TargetIndex { map: MapItem, item_size: u32, width: u8 },
     TargetOffset32,
 }
 
@@ -660,8 +660,8 @@ fn run_item_mapper(mapper: ItemMapper, image: &[u8], input: u32) -> u32 {
 
 fn run_list_mapper(mapper: ListMapper, image: &[u8], location: u32) -> u32 {
     match mapper {
-        ListMapper::TargetIndex { map, item_size } => {
-            read_target_index(image, map, item_size, location, 2)
+        ListMapper::TargetIndex { map, item_size, width } => {
+            read_target_index(image, map, item_size, location, width)
         }
         ListMapper::TargetOffset32 => read_target_offset32(image, location),
     }
@@ -985,6 +985,10 @@ impl Disassembler for DexDisassembler {
 
     #[allow(clippy::too_many_lines)]
     fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Vec<Reference> {
+        // The index field width equals the group's declared reference width for
+        // every index-based mapper (e.g. annotations-directory ids are 32-bit),
+        // so derive it instead of hardcoding per group.
+        let width = self.groups[group].width as u8;
         let string_index = |width: u8| ItemMapper::TargetIndex {
             map: self.string_map,
             item_size: 4,
@@ -995,20 +999,20 @@ impl Disassembler for DexDisassembler {
             item_size: 4,
             width,
         };
-        let proto_index = ItemMapper::TargetIndex { map: self.proto_map, item_size: 12, width: 2 };
+        let proto_index = ItemMapper::TargetIndex { map: self.proto_map, item_size: 12, width };
         match group {
-            0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(4), false),
-            1 => item_reader(image, lo, hi, self.proto_map, 12, 0, string_index(4), false),
-            2 => item_reader(image, lo, hi, self.field_map, 8, 4, string_index(4), false),
-            3 => item_reader(image, lo, hi, self.method_map, 8, 4, string_index(4), false),
-            4 => item_reader(image, lo, hi, self.class_def_map, 32, 16, string_index(4), false),
+            0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(width), false),
+            1 => item_reader(image, lo, hi, self.proto_map, 12, 0, string_index(width), false),
+            2 => item_reader(image, lo, hi, self.field_map, 8, 4, string_index(width), false),
+            3 => item_reader(image, lo, hi, self.method_map, 8, 4, string_index(width), false),
+            4 => item_reader(image, lo, hi, self.class_def_map, 32, 16, string_index(width), false),
             5 => instruction_reader(
                 image,
                 lo,
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::String16,
-                InstrMapper::TargetIndex { map: self.string_map, item_size: 4, width: 2 },
+                InstrMapper::TargetIndex { map: self.string_map, item_size: 4, width },
             ),
             6 => instruction_reader(
                 image,
@@ -1016,21 +1020,21 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::String32,
-                InstrMapper::TargetIndex { map: self.string_map, item_size: 4, width: 4 },
+                InstrMapper::TargetIndex { map: self.string_map, item_size: 4, width },
             ),
-            7 => item_reader(image, lo, hi, self.proto_map, 12, 4, type_index(4), false),
-            8 => item_reader(image, lo, hi, self.field_map, 8, 0, type_index(2), false),
-            9 => item_reader(image, lo, hi, self.field_map, 8, 2, type_index(2), false),
-            10 => item_reader(image, lo, hi, self.method_map, 8, 0, type_index(2), false),
-            11 => item_reader(image, lo, hi, self.class_def_map, 32, 0, type_index(4), false),
-            12 => item_reader(image, lo, hi, self.class_def_map, 32, 8, type_index(4), false),
+            7 => item_reader(image, lo, hi, self.proto_map, 12, 4, type_index(width), false),
+            8 => item_reader(image, lo, hi, self.field_map, 8, 0, type_index(width), false),
+            9 => item_reader(image, lo, hi, self.field_map, 8, 2, type_index(width), false),
+            10 => item_reader(image, lo, hi, self.method_map, 8, 0, type_index(width), false),
+            11 => item_reader(image, lo, hi, self.class_def_map, 32, 0, type_index(width), false),
+            12 => item_reader(image, lo, hi, self.class_def_map, 32, 8, type_index(width), false),
             13 => cached_item_list_reader(
                 image,
                 lo,
                 hi,
                 0,
                 &self.type_list_offsets,
-                ListMapper::TargetIndex { map: self.type_map, item_size: 4 },
+                ListMapper::TargetIndex { map: self.type_map, item_size: 4, width },
             ),
             14 => instruction_reader(
                 image,
@@ -1038,7 +1042,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::Type,
-                InstrMapper::TargetIndex { map: self.type_map, item_size: 4, width: 2 },
+                InstrMapper::TargetIndex { map: self.type_map, item_size: 4, width },
             ),
             15 => instruction_reader(
                 image,
@@ -1046,7 +1050,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::Proto,
-                InstrMapper::TargetIndex { map: self.proto_map, item_size: 12, width: 2 },
+                InstrMapper::TargetIndex { map: self.proto_map, item_size: 12, width },
             ),
             16 => item_reader(image, lo, hi, self.method_map, 8, 2, proto_index, false),
             17 => instruction_reader(
@@ -1055,7 +1059,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::Field,
-                InstrMapper::TargetIndex { map: self.field_map, item_size: 8, width: 2 },
+                InstrMapper::TargetIndex { map: self.field_map, item_size: 8, width },
             ),
             18 => item_reader(
                 image,
@@ -1078,7 +1082,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 0,
                 &self.field_annotation_offsets,
-                ListMapper::TargetIndex { map: self.field_map, item_size: 8 },
+                ListMapper::TargetIndex { map: self.field_map, item_size: 8, width },
             ),
             20 => instruction_reader(
                 image,
@@ -1086,7 +1090,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::Method,
-                InstrMapper::TargetIndex { map: self.method_map, item_size: 8, width: 2 },
+                InstrMapper::TargetIndex { map: self.method_map, item_size: 8, width },
             ),
             21 => item_reader(
                 image,
@@ -1109,7 +1113,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 0,
                 &self.method_annotation_offsets,
-                ListMapper::TargetIndex { map: self.method_map, item_size: 8 },
+                ListMapper::TargetIndex { map: self.method_map, item_size: 8, width },
             ),
             23 => cached_item_list_reader(
                 image,
@@ -1117,7 +1121,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 0,
                 &self.parameter_annotation_offsets,
-                ListMapper::TargetIndex { map: self.method_map, item_size: 8 },
+                ListMapper::TargetIndex { map: self.method_map, item_size: 8, width },
             ),
             24 => instruction_reader(
                 image,
@@ -1125,7 +1129,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::CallSite,
-                InstrMapper::TargetIndex { map: self.call_site_map, item_size: 4, width: 2 },
+                InstrMapper::TargetIndex { map: self.call_site_map, item_size: 4, width },
             ),
             25 => instruction_reader(
                 image,
@@ -1133,7 +1137,7 @@ impl Disassembler for DexDisassembler {
                 hi,
                 &self.code_item_offsets,
                 CodeFilter::MethodHandle,
-                InstrMapper::TargetIndex { map: self.method_handle_map, item_size: 8, width: 2 },
+                InstrMapper::TargetIndex { map: self.method_handle_map, item_size: 8, width },
             ),
             26 => item_reader(image, lo, hi, self.proto_map, 12, 8, ItemMapper::TargetOffset32, false),
             27 => item_reader(
@@ -1366,5 +1370,17 @@ mod tests {
         let instructions = parse_instructions(&image, 0);
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].opcode, 0x00);
+    }
+
+    #[test]
+    fn target_index_width_controls_truncation() {
+        // Native reads `TypeIdItem::descriptor_idx` (group 0) and the
+        // annotations-directory ids (groups 19/22/23) as 32-bit indices; a
+        // hardcoded 16-bit read would silently truncate the high bytes.
+        let map = MapItem { size: 3, offset: 100 };
+        let mut image = vec![0u8; 120];
+        image[10..14].copy_from_slice(&0x0001_0002u32.to_le_bytes());
+        assert_eq!(read_target_index(&image, map, 4, 10, 4), K_INVALID_OFFSET);
+        assert_eq!(read_target_index(&image, map, 4, 10, 2), 108);
     }
 }
