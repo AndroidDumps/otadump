@@ -21,15 +21,17 @@ The target changes one same-length string while preserving both code references.
 This resolves the 16-bit writer to the existing jumbo target at index 65,536 and must fail in preflight.
 The expected bytes are stored independently and are not constructed by the adapter tests.
 
-The `*.zuc.br` files wrap the matching serialized patches with Brotli.
-They were created offline with the independent Brotli 1.2.0 command-line compressor:
+Integration tests wrap canonical `*.zuc` patches with Brotli at runtime.
+They use quality 9 and lgwin 20 to match the original fixture-generation settings:
 
 ```sh
 brotli --quality=9 --lgwin=20 --stdout input.zuc > input.zuc.br
 ```
 
-`malformed-zucchini.zuc.br` is the same Brotli encoding of the ASCII bytes `not a zucchini patch`.
-`malformed-brotli.zuc.br` contains the ASCII bytes `not a Brotli stream` followed by a newline and is intentionally not a Brotli stream.
+Malformed wrapper cases are synthesized in test code from two deterministic inputs:
+
+- raw bytes `not a Brotli stream\n` (intentionally not Brotli), and
+- Brotli-compressed bytes of `not a zucchini patch` (valid Brotli, invalid inner patch).
 
 ## Realistic DEX differential fixture
 

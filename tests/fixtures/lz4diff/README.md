@@ -1,7 +1,9 @@
 # Frozen LZ4DIFF operation fixtures
 
 These static fixtures exercise complete version-1 `LZ4DIFF` operation data.
-Each case contains the physical source bytes, the independently frozen physical target bytes, and the complete container patch.
+Each case keeps its complete container patch. Tests deterministically build the
+small physical source/target blocks from canonical fixtures when those bytes are
+derivable from pinned upstream references.
 
 The LZ4, LZ4HC9, and zero-padding source and target bytes come unchanged from the Milestone 6a reference proof.
 That proof pins AOSP `platform/external/lz4` commit `734e07032602e9a72fcc9701028b0aee45147fcd` and `platform/system/update_engine` commit `dc84c2552b2d4cf00d2a843cb1c091d99d0499f1`.
@@ -23,4 +25,5 @@ The extractor does not generate expected target bytes.
 
 The LZ4-derived bytes retain the BSD-2-Clause license in `LICENSE.lz4`.
 The Puffin-derived bytes retain the BSD-3-Clause license in `LICENSE.puffin`.
-Run `sha256sum -c SHA256SUMS` from this directory to verify every frozen file.
+Run `sha256sum -c SHA256SUMS` from this directory to verify every retained
+frozen file.

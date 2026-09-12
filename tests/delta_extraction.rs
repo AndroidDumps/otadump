@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(otadump_zucchini)]
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -148,7 +150,78 @@ const BROTLI_INVALID_HEADER_PATCH: &[u8] = &[
 ];
 
 const PUFFIN_FIXTURES: &str = "tests/fixtures/puffin";
+const LZ4_FIXTURES: &str = "tests/fixtures/lz4";
 const LZ4DIFF_FIXTURES: &str = "tests/fixtures/lz4diff";
+
+#[cfg(otadump_zucchini)]
+fn brotli_compress(bytes: &[u8]) -> Vec<u8> {
+    let mut compressed = Vec::new();
+    {
+        let mut writer = brotli::CompressorWriter::new(&mut compressed, 4096, 9, 20);
+        writer.write_all(bytes).unwrap();
+    }
+    compressed
+}
+
+#[cfg(otadump_zucchini)]
+fn zucchini_brotli_patch(name: &str) -> Vec<u8> {
+    let patch = fs::read(Path::new(ZUCCHINI_FIXTURES).join(format!("{name}.zuc"))).unwrap();
+    brotli_compress(&patch)
+}
+
+#[cfg(otadump_zucchini)]
+fn malformed_brotli_stream() -> Vec<u8> {
+    b"not a Brotli stream\n".to_vec()
+}
+
+#[cfg(otadump_zucchini)]
+fn malformed_inner_zucchini_patch() -> Vec<u8> {
+    brotli_compress(b"not a zucchini patch")
+}
+
+#[cfg(otadump_zucchini)]
+fn truncated_zucchini_patch(name: &str) -> Vec<u8> {
+    let mut patch = zucchini_brotli_patch(name);
+    patch.truncate(patch.len() - 1);
+    patch
+}
+
+fn lz4_reference(name: &str) -> Vec<u8> {
+    fs::read(Path::new(LZ4_FIXTURES).join(name)).unwrap()
+}
+
+fn lz4diff_fixture_case(name: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let patch = fs::read(Path::new(LZ4DIFF_FIXTURES).join(name).join("patch.lz4diff")).unwrap();
+    let (source, target) = match name {
+        "lz4-bsdiff" => {
+            let block = lz4_reference("lz4-no-postfix.lz4");
+            (block.clone(), block)
+        }
+        "lz4hc9-bsdiff" => {
+            let block = lz4_reference("lz4hc9-no-postfix.lz4");
+            (block.clone(), block)
+        }
+        "zero-padding-bsdiff" => {
+            let block = lz4_reference("zero-padding-layout.lz4");
+            (block.clone(), block)
+        }
+        "postfix-bsdiff" => {
+            let source = lz4_reference("lz4-no-postfix.lz4");
+            let mut target = source.clone();
+            target[23] ^= 0x5a;
+            (source, target)
+        }
+        "raw-puffdiff" => {
+            let fixtures = Path::new(LZ4DIFF_FIXTURES).join(name);
+            (
+                fs::read(fixtures.join("source.bin")).unwrap(),
+                fs::read(fixtures.join("target.bin")).unwrap(),
+            )
+        }
+        _ => panic!("unknown LZ4DIFF fixture {name}"),
+    };
+    (source, target, patch)
+}
 
 fn run_lz4diff_bytes(
     source: &[u8],
@@ -202,10 +275,7 @@ fn run_lz4diff_bytes(
 }
 
 fn run_lz4diff_extraction(name: &str, operation_type: i32) -> Result<Vec<u8>, String> {
-    let fixtures = Path::new(LZ4DIFF_FIXTURES).join(name);
-    let source = fs::read(fixtures.join("source.bin")).unwrap();
-    let target = fs::read(fixtures.join("target.bin")).unwrap();
-    let patch = fs::read(fixtures.join("patch.lz4diff")).unwrap();
+    let (source, target, patch) = lz4diff_fixture_case(name);
     run_lz4diff_bytes(&source, &target, &patch, operation_type)
 }
 
@@ -233,7 +303,7 @@ fn lz4diff_operations_reconstruct_frozen_targets() {
         ("postfix-bsdiff", 12),
         ("raw-puffdiff", 13),
     ] {
-        let expected = fs::read(Path::new(LZ4DIFF_FIXTURES).join(name).join("target.bin")).unwrap();
+        let (_, expected, _) = lz4diff_fixture_case(name);
         let output = run_lz4diff_extraction(name, operation_type).unwrap();
         assert_eq!(output, expected, "fixture {name}");
     }
@@ -241,10 +311,7 @@ fn lz4diff_operations_reconstruct_frozen_targets() {
 
 #[test]
 fn malformed_lz4diff_data_fails_without_publication_or_process_failure() {
-    let fixtures = Path::new(LZ4DIFF_FIXTURES).join("postfix-bsdiff");
-    let source = fs::read(fixtures.join("source.bin")).unwrap();
-    let target = fs::read(fixtures.join("target.bin")).unwrap();
-    let valid = fs::read(fixtures.join("patch.lz4diff")).unwrap();
+    let (source, target, valid) = lz4diff_fixture_case("postfix-bsdiff");
 
     let mut bad_magic = valid.clone();
     bad_magic[0] = b'X';
@@ -489,8 +556,7 @@ fn malformed_puffdiff_zucchini_fails_without_publication_or_process_failure() {
     let source = puffin_fixture("deflates-sample1.bin");
     let target = puffin_fixture("deflates-sample2.bin");
     let valid_patch = puffin_fixture("patch-1-to-2-zucchini.puf");
-    let malformed_zucchini =
-        fs::read(Path::new("tests/fixtures/zucchini/malformed-zucchini.zuc.br")).unwrap();
+    let malformed_zucchini = malformed_inner_zucchini_patch();
 
     for (patch, expected_error) in [
         (
@@ -525,7 +591,7 @@ fn assert_zucchini_extraction(name: &str, extension: &str) {
     let fixtures = Path::new(ZUCCHINI_FIXTURES);
     let old = fs::read(fixtures.join(format!("{name}-old{extension}"))).unwrap();
     let target = fs::read(fixtures.join(format!("{name}-new{extension}"))).unwrap();
-    let patch = fs::read(fixtures.join(format!("{name}.zuc.br"))).unwrap();
+    let patch = zucchini_brotli_patch(name);
     let temporary = TempDir::new().unwrap();
     let source_dir = temporary.path().join("source");
     let output_dir = temporary.path().join("output");
@@ -585,8 +651,7 @@ fn assert_zucchini_extraction(name: &str, extension: &str) {
 }
 
 #[cfg(otadump_zucchini)]
-fn assert_zucchini_extraction_fails(patch_name: &str, expected_error: &str) {
-    let patch = fs::read(Path::new(ZUCCHINI_FIXTURES).join(patch_name)).unwrap();
+fn assert_zucchini_extraction_fails(patch: &[u8], expected_error: &str) {
     let temporary = TempDir::new().unwrap();
     let source_dir = temporary.path().join("source");
     let output_dir = temporary.path().join("output");
@@ -608,14 +673,14 @@ fn assert_zucchini_extraction_fails(patch_name: &str, expected_error: &str) {
                 src_length: Some(source.len() as u64),
                 dst_extents: vec![extent(0, source.len() as u64)],
                 dst_length: Some(source.len() as u64),
-                data_sha256_hash: Some(sha256(&patch)),
+                data_sha256_hash: Some(sha256(patch)),
                 src_sha256_hash: Some(sha256(source)),
             }],
             ..Default::default()
         }],
     };
     let payload = temporary.path().join("payload.bin");
-    write_payload(&payload, manifest, &patch);
+    write_payload(&payload, manifest, patch);
 
     let error = ExtractOptions::new()
         .source_dir(&source_dir)
@@ -659,19 +724,16 @@ fn zucchini_operations_reconstruct_android_formats_exactly() {
 #[test]
 #[cfg(otadump_zucchini)]
 fn zucchini_operation_rejects_malformed_outer_brotli_without_publication() {
-    assert_zucchini_extraction_fails(
-        "malformed-brotli.zuc.br",
-        "Unable to decode ZUCCHINI Brotli patch",
-    );
+    for patch in [malformed_brotli_stream(), truncated_zucchini_patch("noop")] {
+        assert_zucchini_extraction_fails(&patch, "Unable to decode ZUCCHINI Brotli patch");
+    }
 }
 
 #[test]
 #[cfg(otadump_zucchini)]
 fn zucchini_operation_rejects_malformed_inner_patch_without_publication() {
-    assert_zucchini_extraction_fails(
-        "malformed-zucchini.zuc.br",
-        "ZUCCHINI apply failed: invalid ensemble patch",
-    );
+    let malformed = malformed_inner_zucchini_patch();
+    assert_zucchini_extraction_fails(&malformed, "ZUCCHINI apply failed: invalid ensemble patch");
 }
 
 #[test]
