@@ -345,6 +345,8 @@ fn parse_item_offsets(
         return None;
     }
     let mut offsets = Vec::new();
+    let upper = image.len().saturating_sub(map_item.offset as usize) / item_width;
+    offsets.try_reserve(upper).ok()?;
     let mut pos = map_item.offset as usize;
     for _ in 0..map_item.size {
         // AlignOn(image, 4).
@@ -377,12 +379,14 @@ fn parse_annotations_directory_items(
     let mut field_offsets = Vec::new();
     let mut method_offsets = Vec::new();
     let mut parameter_offsets = Vec::new();
+    directory_offsets.try_reserve(map_item.size as usize).ok()?;
     let mut pos = map_item.offset as usize;
 
     let parse_list = |pos: &mut usize, count: u32, width: usize, out: &mut Vec<u32>| -> Option<()> {
         if (image.len() - *pos) / width < count as usize {
             return None;
         }
+        out.try_reserve(count as usize).ok()?;
         for _ in 0..count {
             out.push(*pos as u32);
             *pos += width;
@@ -676,7 +680,7 @@ fn item_reader(
     rel_location: u32,
     mapper: ItemMapper,
     wants_item: bool,
-) -> Vec<Reference> {
+) -> Result<Vec<Reference>> {
     let item_base_offset = map.offset;
     let num_items = map.size;
     let mapper_input_delta = if wants_item { 0 } else { rel_location };
@@ -697,6 +701,9 @@ fn item_reader(
     }
 
     let mut result = Vec::new();
+    result
+        .try_reserve(num_items.saturating_sub(cur_idx) as usize)
+        .map_err(|_| super::allocation_error("DEX item references"))?;
     while cur_idx < num_items {
         let item_offset = offset_of_index(cur_idx);
         let location = item_offset.wrapping_add(rel_location);
@@ -716,7 +723,7 @@ fn item_reader(
             result.push(Reference { location, target });
         }
     }
-    result
+    Ok(result)
 }
 
 fn cached_item_list_reader(
@@ -726,12 +733,15 @@ fn cached_item_list_reader(
     rel_location: u32,
     offsets: &[u32],
     mapper: ListMapper,
-) -> Vec<Reference> {
+) -> Result<Vec<Reference>> {
     let mut index = offsets.partition_point(|offset| *offset <= lo);
     if index != 0 && offsets[index - 1].wrapping_add(rel_location) >= lo {
         index -= 1;
     }
     let mut result = Vec::new();
+    result
+        .try_reserve(offsets.len().saturating_sub(index))
+        .map_err(|_| super::allocation_error("DEX annotation references"))?;
     while index < offsets.len() {
         let location = offsets[index].wrapping_add(rel_location);
         if location >= hi {
@@ -747,7 +757,7 @@ fn cached_item_list_reader(
         }
         result.push(Reference { location, target });
     }
-    result
+    Ok(result)
 }
 
 #[derive(Clone, Copy)]
@@ -771,13 +781,16 @@ fn code_item_insns(image: &[u8], base_offset: u32) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-fn parse_instructions(image: &[u8], base_offset: u32) -> Vec<InstructionValue> {
+fn parse_instructions(image: &[u8], base_offset: u32) -> Result<Vec<InstructionValue>> {
     let Some((insns_start, insns_end)) = code_item_insns(image, base_offset) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut pos = insns_start;
     let mut boundary = insns_end;
     let mut result = Vec::new();
+    result
+        .try_reserve((insns_end - insns_start) / 2)
+        .map_err(|_| super::allocation_error("DEX instructions"))?;
     while pos < boundary {
         let opcode = image[pos];
         let Some(instruction) = find_instruction(opcode) else { break };
@@ -804,7 +817,7 @@ fn parse_instructions(image: &[u8], base_offset: u32) -> Vec<InstructionValue> {
         });
         pos += length_bytes;
     }
-    result
+    Ok(result)
 }
 
 fn filter_location(filter: CodeFilter, value: InstructionValue) -> Option<u32> {
@@ -879,26 +892,29 @@ fn instruction_reader(
     code_item_offsets: &[u32],
     filter: CodeFilter,
     mapper: InstrMapper,
-) -> Vec<Reference> {
+) -> Result<Vec<Reference>> {
     if code_item_offsets.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut index = code_item_offsets.partition_point(|offset| *offset <= lo);
     if index != 0 {
         index -= 1;
     }
     let mut result = Vec::new();
+    result
+        .try_reserve((hi.saturating_sub(lo) / 2) as usize)
+        .map_err(|_| super::allocation_error("DEX code references"))?;
     loop {
-        for value in parse_instructions(image, code_item_offsets[index]) {
+        for value in parse_instructions(image, code_item_offsets[index])? {
             if value.instr_offset >= hi {
-                return result;
+                return Ok(result);
             }
             let Some(location) = filter_location(filter, value) else { continue };
             if location == K_INVALID_OFFSET || location < lo {
                 continue;
             }
             if location >= hi {
-                return result;
+                return Ok(result);
             }
             let target = run_instr_mapper(mapper, image, location);
             if target != K_INVALID_OFFSET {
@@ -907,7 +923,7 @@ fn instruction_reader(
         }
         index += 1;
         if index >= code_item_offsets.len() {
-            return result;
+            return Ok(result);
         }
     }
 }
@@ -1000,7 +1016,7 @@ impl Disassembler for DexDisassembler {
             width,
         };
         let proto_index = ItemMapper::TargetIndex { map: self.proto_map, item_size: 12, width };
-        Ok(match group {
+        match group {
             0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(width), false),
             1 => item_reader(image, lo, hi, self.proto_map, 12, 0, string_index(width), false),
             2 => item_reader(image, lo, hi, self.field_map, 8, 4, string_index(width), false),
@@ -1263,8 +1279,8 @@ impl Disassembler for DexDisassembler {
                 ItemMapper::TargetOffset32,
                 false,
             ),
-            _ => Vec::new(),
-        })
+            _ => Ok(Vec::new()),
+        }
     }
 
     fn write(&self, group: usize, image: &mut [u8], reference: Reference) {
@@ -1367,7 +1383,7 @@ mod tests {
         image[19] = 0x00; // vAA
         image[20..24].copy_from_slice(&9i32.to_le_bytes()); // payload offset
 
-        let instructions = parse_instructions(&image, 0);
+        let instructions = parse_instructions(&image, 0).unwrap();
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].opcode, 0x00);
     }

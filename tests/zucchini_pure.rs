@@ -277,3 +277,24 @@ fn pure_rust_rejects_absurd_declared_stream_length() {
     let error = zucchini_pure::apply(old, &patch, new.len()).unwrap_err();
     assert_eq!(error.status(), Status::InvalidPatch);
 }
+
+#[test]
+fn pure_rust_rejects_absurd_pool_count() {
+    let old = b"ABCD";
+    let new = b"ABCDE";
+    let mut patch = build_noop_patch(old, new, &[]);
+    let len = patch.len();
+    patch[len - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+    let error = zucchini_pure::apply(old, &patch, new.len()).unwrap_err();
+    assert_eq!(error.status(), Status::InvalidPatch);
+}
+
+#[test]
+fn pure_rust_rejects_absurd_element_count() {
+    let old = b"ABCD";
+    let new = b"ABCDE";
+    let mut patch = build_noop_patch(old, new, &[]);
+    patch[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+    let error = zucchini_pure::apply(old, &patch, new.len()).unwrap_err();
+    assert_eq!(error.status(), Status::InvalidPatch);
+}

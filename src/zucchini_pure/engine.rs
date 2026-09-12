@@ -161,6 +161,9 @@ fn validate_reference_boundaries(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<bool> {
     let mut boundaries: Vec<u32> = Vec::new();
+    boundaries
+        .try_reserve(element.equivalences.len().saturating_mul(2))
+        .map_err(|_| super::allocation_error("Zucchini equivalence boundaries"))?;
     for equivalence in &element.equivalences {
         boundaries.push(equivalence.src_offset);
         boundaries.push(equivalence.src_end());
@@ -237,17 +240,17 @@ fn validate_dex_reference_targets(
         &element.equivalences,
         old_size,
         new_image.len() as u32,
-    );
+    )?;
 
     for (pool_tag, sub_groups) in &pools {
         check_not_cancelled(cancelled)?;
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
-            targets.insert_references(&old_disasm.read(group_index, old_image, 0, old_size)?);
+            targets.insert_references(&old_disasm.read(group_index, old_image, 0, old_size)?)?;
         }
-        targets.filter_and_project(&mapper);
+        targets.filter_and_project(&mapper)?;
         if let Some(extra) = element.extra_targets.get(pool_tag) {
-            targets.insert_targets(&extra.targets);
+            targets.insert_targets(&extra.targets)?;
             if !extra.done {
                 return Ok(false);
             }
@@ -434,7 +437,7 @@ fn apply_references_correction(
         &element.equivalences,
         old_image.len() as u32,
         new_image.len() as u32,
-    );
+    )?;
 
     let mut pools: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
     for (index, group) in old_groups.iter().enumerate() {
@@ -447,12 +450,12 @@ fn apply_references_correction(
         let mut targets = TargetPool::default();
         for &group_index in sub_groups {
             let references = old_disasm.read(group_index, old_image, 0, old_image.len() as u32)?;
-            targets.insert_references(&references);
+            targets.insert_references(&references)?;
         }
-        targets.filter_and_project(&mapper);
+        targets.filter_and_project(&mapper)?;
 
         if let Some(extra) = element.extra_targets.get(pool_tag) {
-            targets.insert_targets(&extra.targets);
+            targets.insert_targets(&extra.targets)?;
             if !extra.done {
                 return Err(apply_error("found trailing extra targets"));
             }
@@ -509,10 +512,14 @@ struct OffsetMapper {
 }
 
 impl OffsetMapper {
-    fn new(source: &[Equivalence], old_image_size: u32, new_image_size: u32) -> Self {
-        let mut equivalences = source.to_vec();
+    fn new(source: &[Equivalence], old_image_size: u32, new_image_size: u32) -> Result<Self> {
+        let mut equivalences = Vec::new();
+        equivalences
+            .try_reserve_exact(source.len())
+            .map_err(|_| super::allocation_error("Zucchini equivalences"))?;
+        equivalences.extend_from_slice(source);
         PruneEquivalencesAndSortBySource::prune(&mut equivalences);
-        Self { equivalences, old_image_size, new_image_size }
+        Ok(Self { equivalences, old_image_size, new_image_size })
     }
 
     fn naive_extended_forward_project(&self, unit: &Equivalence, offset: u32) -> u32 {
@@ -627,19 +634,28 @@ impl TargetPool {
         self.targets.dedup();
     }
 
-    fn insert_references(&mut self, references: &[Reference]) {
+    fn insert_references(&mut self, references: &[Reference]) -> Result<()> {
+        self.targets
+            .try_reserve(references.len())
+            .map_err(|_| super::allocation_error("Zucchini target pool"))?;
         self.targets.extend(references.iter().map(|reference| reference.target));
         self.sort_and_uniquify();
+        Ok(())
     }
 
-    fn insert_targets(&mut self, targets: &[u32]) {
+    fn insert_targets(&mut self, targets: &[u32]) -> Result<()> {
+        self.targets
+            .try_reserve(targets.len())
+            .map_err(|_| super::allocation_error("Zucchini target pool"))?;
         self.targets.extend_from_slice(targets);
         self.sort_and_uniquify();
+        Ok(())
     }
 
-    fn filter_and_project(&mut self, mapper: &OffsetMapper) {
+    fn filter_and_project(&mut self, mapper: &OffsetMapper) -> Result<()> {
         mapper.forward_project_all(&mut self.targets);
         self.targets.sort_unstable();
+        Ok(())
     }
 
     /// Mirrors `KeyForNearestOffset`, including its lower-key tie-breaking.

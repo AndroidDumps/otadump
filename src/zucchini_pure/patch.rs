@@ -211,11 +211,16 @@ fn parse_equivalences(
     src_skip: &[u8],
     dst_skip: &[u8],
     copy_count: &[u8],
-) -> (Vec<Equivalence>, bool) {
+) -> Result<(Vec<Equivalence>, bool)> {
     let mut src = Cursor::new(src_skip);
     let mut dst = Cursor::new(dst_skip);
     let mut count = Cursor::new(copy_count);
     let mut result = Vec::new();
+    // Each decoded equivalence consumes at least one byte from every stream.
+    let upper = src_skip.len().min(dst_skip.len()).min(copy_count.len());
+    result
+        .try_reserve(upper)
+        .map_err(|_| super::allocation_error("Zucchini equivalence stream"))?;
     let mut previous_src: u32 = 0;
     let mut previous_dst: u32 = 0;
     while !src.empty() && !dst.empty() && !count.empty() {
@@ -250,13 +255,17 @@ fn parse_equivalences(
         result.push(Equivalence { src_offset, dst_offset, length });
     }
     let done = src.empty() && dst.empty() && count.empty();
-    (result, done)
+    Ok((result, done))
 }
 
-fn parse_raw_deltas(skip: &[u8], diffs: &[u8]) -> (Vec<RawDeltaUnit>, bool) {
+fn parse_raw_deltas(skip: &[u8], diffs: &[u8]) -> Result<(Vec<RawDeltaUnit>, bool)> {
     let mut skip = Cursor::new(skip);
     let mut diffs = Cursor::new(diffs);
     let mut result = Vec::new();
+    let upper = skip.data.len().min(diffs.data.len());
+    result
+        .try_reserve(upper)
+        .map_err(|_| super::allocation_error("Zucchini raw delta stream"))?;
     let mut compensation: u32 = 0;
     while !skip.empty() && !diffs.empty() {
         let diff = match skip.var_u32() {
@@ -282,24 +291,30 @@ fn parse_raw_deltas(skip: &[u8], diffs: &[u8]) -> (Vec<RawDeltaUnit>, bool) {
         result.push(RawDeltaUnit { copy_offset, diff: byte_diff });
     }
     let done = skip.empty() && diffs.empty();
-    (result, done)
+    Ok((result, done))
 }
 
-fn parse_reference_deltas(source: &[u8]) -> (Vec<i32>, bool) {
+fn parse_reference_deltas(source: &[u8]) -> Result<(Vec<i32>, bool)> {
     let mut cursor = Cursor::new(source);
     let mut result = Vec::new();
+    result
+        .try_reserve(source.len())
+        .map_err(|_| super::allocation_error("Zucchini reference delta stream"))?;
     while !cursor.empty() {
         match cursor.var_i32() {
             Some(value) => result.push(value),
             None => break,
         }
     }
-    (result, cursor.empty())
+    Ok((result, cursor.empty()))
 }
 
-fn parse_extra_targets(source: &[u8]) -> ExtraTargets {
+fn parse_extra_targets(source: &[u8]) -> Result<ExtraTargets> {
     let mut cursor = Cursor::new(source);
     let mut targets = Vec::new();
+    targets
+        .try_reserve(source.len())
+        .map_err(|_| super::allocation_error("Zucchini extra target stream"))?;
     let mut compensation: u32 = 0;
     while !cursor.empty() {
         let diff = match cursor.var_u32() {
@@ -316,7 +331,7 @@ fn parse_extra_targets(source: &[u8]) -> ExtraTargets {
         };
         targets.push(target);
     }
-    ExtraTargets { targets, done: cursor.empty() }
+    Ok(ExtraTargets { targets, done: cursor.empty() })
 }
 
 impl PatchElement {
@@ -334,11 +349,15 @@ impl PatchElement {
             .buffer()
             .ok_or_else(|| invalid_patch("invalid equivalence source"))?;
         let (equivalences, equivalences_done) =
-            parse_equivalences(src_skip, dst_skip, copy_count);
-        let extra_data = cursor
+            parse_equivalences(src_skip, dst_skip, copy_count)?;
+        let extra_slice = cursor
             .buffer()
-            .ok_or_else(|| invalid_patch("invalid extra data"))?
-            .to_vec();
+            .ok_or_else(|| invalid_patch("invalid extra data"))?;
+        let mut extra_data = Vec::new();
+        extra_data
+            .try_reserve_exact(extra_slice.len())
+            .map_err(|_| super::allocation_error("Zucchini extra data"))?;
+        extra_data.extend_from_slice(extra_slice);
 
         // Mirrors ValidateEquivalencesAndExtraData().
         let old_region_size = u64::from(element_match.old_size);
@@ -375,17 +394,21 @@ impl PatchElement {
         let raw_diff = cursor
             .buffer()
             .ok_or_else(|| invalid_patch("invalid raw delta source"))?;
-        let (raw_deltas, raw_deltas_done) = parse_raw_deltas(raw_skip, raw_diff);
+        let (raw_deltas, raw_deltas_done) = parse_raw_deltas(raw_skip, raw_diff)?;
 
         let reference_source = cursor
             .buffer()
             .ok_or_else(|| invalid_patch("invalid reference delta source"))?;
         let (reference_deltas, reference_deltas_done) =
-            parse_reference_deltas(reference_source);
+            parse_reference_deltas(reference_source)?;
 
         let pool_count = cursor
             .u32()
             .ok_or_else(|| invalid_patch("invalid extra target list"))?;
+        // Each pool costs at least a tag byte plus a 4-byte length prefix.
+        if pool_count as usize > cursor.remaining() / 5 {
+            return Err(invalid_patch("invalid extra target list"));
+        }
         let mut extra_targets = BTreeMap::new();
         for _ in 0..pool_count {
             let pool_tag = cursor
@@ -397,7 +420,7 @@ impl PatchElement {
             let source = cursor
                 .buffer()
                 .ok_or_else(|| invalid_patch("invalid extra target list"))?;
-            if extra_targets.insert(pool_tag, parse_extra_targets(source)).is_some() {
+            if extra_targets.insert(pool_tag, parse_extra_targets(source)?).is_some() {
                 return Err(invalid_patch("duplicate pool tag"));
             }
         }
@@ -435,6 +458,12 @@ impl Patch {
             .u32()
             .ok_or_else(|| invalid_patch("invalid ensemble patch"))?;
         let mut elements = Vec::new();
+        // Each element header is 22 bytes, so this bounds the reservation even
+        // if `element_count` is absurd.
+        let upper = (data.len() / 22).min(element_count as usize);
+        elements
+            .try_reserve(upper)
+            .map_err(|_| super::allocation_error("Zucchini patch elements"))?;
         let mut current_dst_offset: u32 = 0;
         for _ in 0..element_count {
             let element = PatchElement::parse(&mut cursor)?;

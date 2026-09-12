@@ -13,6 +13,15 @@ use super::{
 const K_RVA_BOUND: u32 = 0x7FFF_FFFF;
 const K_SIZE_BOUND: u64 = 0x7FFF_0000;
 
+/// Fallible push: only grows the vector through `try_reserve`.
+fn push_checked<T>(vec: &mut Vec<T>, value: T) -> Option<()> {
+    if vec.len() == vec.capacity() {
+        vec.try_reserve(1).ok()?;
+    }
+    vec.push(value);
+    Some(())
+}
+
 const SHT_PROGBITS: u32 = 1;
 const SHT_RELA: u32 = 4;
 const SHT_NOBITS: u32 = 8;
@@ -246,7 +255,11 @@ impl AddressTranslator {
             return false;
         }
 
-        self.by_offset = units.clone();
+        self.by_offset = Vec::new();
+        if self.by_offset.try_reserve_exact(units.len()).is_err() {
+            return false;
+        }
+        self.by_offset.extend_from_slice(&units);
         units.sort_by_key(|unit| unit.rva_begin);
         self.by_rva = units;
         self.fake_offset_begin = offset_bound;
@@ -304,7 +317,10 @@ impl ElfDisassembler {
         let (sections, offset_bound) = parse_elf_header(kind, image)?;
 
         let mut units = Vec::new();
-        let mut judgements = vec![0i32; sections.len()];
+        units.try_reserve_exact(sections.len()).ok()?;
+        let mut judgements = Vec::new();
+        judgements.try_reserve_exact(sections.len()).ok()?;
+        judgements.resize(sections.len(), 0i32);
         let mut offset_bound = offset_bound;
 
         for (index, section) in sections.iter().enumerate() {
@@ -346,9 +362,9 @@ impl ElfDisassembler {
             rel32_locations: vec![Vec::new(); rel32_type_count(kind)],
         };
 
-        disassembler.extract_interesting_section_headers(&sections, &judgements);
+        disassembler.extract_interesting_section_headers(&sections, &judgements)?;
         disassembler.get_abs32_from_reloc_sections(image)?;
-        disassembler.get_rel32_from_code_sections(image);
+        disassembler.get_rel32_from_code_sections(image)?;
         Some(disassembler)
     }
 
@@ -356,7 +372,9 @@ impl ElfDisassembler {
         &mut self,
         sections: &[SectionHeader],
         judgements: &[i32],
-    ) {
+    ) -> Option<()> {
+        self.reloc_sections.try_reserve(sections.len()).ok()?;
+        self.exec_headers.try_reserve(sections.len()).ok()?;
         for (index, section) in sections.iter().enumerate() {
             if judgements[index] & (1 << 3) == 0 {
                 continue;
@@ -377,15 +395,19 @@ impl ElfDisassembler {
         }
         self.reloc_sections.sort_by_key(|section| section.offset);
         self.exec_headers.sort_by_key(|header| header.offset);
+        Some(())
     }
 
     fn get_abs32_from_reloc_sections(&mut self, image: &[u8]) -> Option<()> {
-        let relocs = self.read_relocs(image, 0, self.size);
-        let mut locations: Vec<u32> = relocs.iter().map(|reference| reference.target).collect();
+        let relocs = self.read_relocs(image, 0, self.size).ok()?;
+        let mut locations: Vec<u32> = Vec::new();
+        locations.try_reserve_exact(relocs.len()).ok()?;
+        locations.extend(relocs.iter().map(|reference| reference.target));
         locations.sort_unstable();
 
         // RemoveUntranslatableAbs32.
-        let mut kept = Vec::with_capacity(locations.len());
+        let mut kept = Vec::new();
+        kept.try_reserve_exact(locations.len()).ok()?;
         for location in locations {
             let value = self.read_absolute(location, image);
             let Some(value) = value else { continue };
@@ -413,27 +435,29 @@ impl ElfDisassembler {
         }
     }
 
-    fn get_rel32_from_code_sections(&mut self, image: &[u8]) {
-        let headers = self.exec_headers.clone();
-        for section in headers {
+    fn get_rel32_from_code_sections(&mut self, image: &[u8]) -> Option<()> {
+        let count = self.exec_headers.len();
+        for index in 0..count {
+            let section = self.exec_headers[index];
             if !self.kind.is_arm() {
-                self.parse_exec_section_intel(&section, image);
+                self.parse_exec_section_intel(&section, image)?;
             } else {
-                self.parse_exec_section_arm(&section, image);
+                self.parse_exec_section_arm(&section, image)?;
             }
         }
         for locations in self.rel32_locations.iter_mut() {
             locations.sort_unstable();
         }
+        Some(())
     }
 
-    fn parse_exec_section_intel(&mut self, section: &ExecHeader, image: &[u8]) {
+    fn parse_exec_section_intel(&mut self, section: &ExecHeader, image: &[u8]) -> Option<()> {
         let start_rva = section.addr;
         let end_rva = start_rva.wrapping_add(section.size);
-        let Some(region) = image.get(section.offset as usize..) else { return };
+        let Some(region) = image.get(section.offset as usize..) else { return Some(()) };
         let region = &region[..section.size.min(region.len() as u32) as usize];
         for (gap_start, gap_end) in
-            self.abs32_gaps(section.offset, section.offset.wrapping_add(section.size))
+            self.abs32_gaps(section.offset, section.offset.wrapping_add(section.size))?
         {
             let mut cursor = gap_start as usize;
             let gap_end = gap_end as usize;
@@ -447,7 +471,7 @@ impl ElfDisassembler {
                             && (can_point_outside
                                 || (start_rva <= target_rva && target_rva < end_rva))
                         {
-                            self.rel32_locations[0].push(location as u32);
+                            push_checked(&mut self.rel32_locations[0], location as u32)?;
                             cursor = location + 4;
                             continue;
                         }
@@ -457,15 +481,16 @@ impl ElfDisassembler {
             }
         }
         let _ = region;
+        Some(())
     }
 
-    fn parse_exec_section_arm(&mut self, section: &ExecHeader, image: &[u8]) {
+    fn parse_exec_section_arm(&mut self, section: &ExecHeader, image: &[u8]) -> Option<()> {
         let is_thumb2 = if self.kind == ElfKind::AArch32 {
             is_exec_section_thumb2(image, section)
         } else {
             false
         };
-        let gaps = self.abs32_gaps(section.offset, section.offset.wrapping_add(section.size));
+        let gaps = self.abs32_gaps(section.offset, section.offset.wrapping_add(section.size))?;
         for (gap_start, gap_end) in gaps {
             match self.kind {
                 ElfKind::AArch32 => {
@@ -481,14 +506,14 @@ impl ElfDisassembler {
                             let (found, size) =
                                 scan_thumb2(image, instr_rva, location, gap_end - cursor);
                             if let Some((addr_type, target_rva)) = found {
-                                self.record_arm_rel32(addr_type, target_rva, location);
+                                self.record_arm_rel32(addr_type, target_rva, location)?;
                             }
                             size
                         } else {
                             if let Some((addr_type, target_rva, _)) =
                                 scan_arm32(image, instr_rva, location)
                             {
-                                self.record_arm_rel32(addr_type, target_rva, location);
+                                self.record_arm_rel32(addr_type, target_rva, location)?;
                             }
                             4
                         };
@@ -510,8 +535,10 @@ impl ElfDisassembler {
                                     self.translator.rva_to_offset(target_rva)
                                 {
                                     if self.is_target_in_exec_section(target_offset) {
-                                        self.rel32_locations[addr_type as usize]
-                                            .push(location);
+                                        push_checked(
+                                            &mut self.rel32_locations[addr_type as usize],
+                                            location,
+                                        )?;
                                     }
                                 }
                             }
@@ -522,14 +549,16 @@ impl ElfDisassembler {
                 _ => unreachable!(),
             }
         }
+        Some(())
     }
 
-    fn record_arm_rel32(&mut self, addr_type: u8, target_rva: u32, location: u32) {
+    fn record_arm_rel32(&mut self, addr_type: u8, target_rva: u32, location: u32) -> Option<()> {
         if let Some(target_offset) = self.translator.rva_to_offset(target_rva) {
             if self.is_target_in_exec_section(target_offset) {
-                self.rel32_locations[addr_type as usize].push(location);
+                push_checked(&mut self.rel32_locations[addr_type as usize], location)?;
             }
         }
+        Some(())
     }
 
     fn is_target_in_exec_section(&self, offset: u32) -> bool {
@@ -543,9 +572,10 @@ impl ElfDisassembler {
 
     /// Mirrors `Abs32GapFinder`: non-empty gaps in `[region_start, region_end)`
     /// that do not overlap an abs32 body.
-    fn abs32_gaps(&self, region_start: u32, region_end: u32) -> Vec<(usize, usize)> {
+    fn abs32_gaps(&self, region_start: u32, region_end: u32) -> Option<Vec<(usize, usize)>> {
         let width = self.kind.va_width();
         let mut gaps = Vec::new();
+        gaps.try_reserve(self.abs32_locations.len().saturating_add(1)).ok()?;
         let mut current = self
             .abs32_locations
             .partition_point(|location| *location < region_start);
@@ -567,14 +597,19 @@ impl ElfDisassembler {
         if cur_lo < region_end {
             gaps.push((cur_lo as usize, region_end as usize));
         }
-        gaps
+        Some(gaps)
     }
 
-    fn read_relocs(&self, image: &[u8], lo: u32, hi: u32) -> Vec<Reference> {
+    fn read_relocs(&self, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>> {
         if self.reloc_sections.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut result = Vec::new();
+        // Upper bound: one reference per relocation entry in the range.
+        let upper = ((hi.saturating_sub(lo)) as usize) / 4 + 1;
+        result
+            .try_reserve(upper)
+            .map_err(|_| super::allocation_error("ELF relocation references"))?;
         let bitness = self.kind.bitness();
         let rel_type = self.kind.rel_type();
 
@@ -606,19 +641,19 @@ impl ElfDisassembler {
             {
                 current += 1;
                 if current == self.reloc_sections.len() {
-                    return result;
+                    return Ok(result);
                 }
                 cursor = self.reloc_sections[current].offset;
                 if cursor + self.reloc_sections[current].entry_size > hi {
-                    return result;
+                    return Ok(result);
                 }
             }
             if current >= self.reloc_sections.len() {
-                return result;
+                return Ok(result);
             }
             let entry_size = self.reloc_sections[current].entry_size;
             if cursor + entry_size > hi {
-                return result;
+                return Ok(result);
             }
 
             let (r_offset, r_info) = if bitness == 4 {
@@ -654,15 +689,14 @@ impl ElfDisassembler {
         }
     }
 
-    fn read_abs32(&self, image: &[u8], lo: u32, hi: u32) -> Vec<Reference> {
+    fn read_abs32(&self, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>> {
         let mut result = Vec::new();
-        for &location in &self.abs32_locations {
-            if location < lo {
-                continue;
-            }
-            if location >= hi {
-                break;
-            }
+        let start = self.abs32_locations.partition_point(|location| *location < lo);
+        let end = self.abs32_locations.partition_point(|location| *location < hi);
+        result
+            .try_reserve(end.saturating_sub(start))
+            .map_err(|_| super::allocation_error("ELF abs32 references"))?;
+        for &location in &self.abs32_locations[start..end] {
             let Some(value) = self.read_absolute(location, image) else { continue };
             if value >= u64::from(K_RVA_BOUND) {
                 continue;
@@ -671,18 +705,18 @@ impl ElfDisassembler {
                 result.push(Reference { location, target });
             }
         }
-        result
+        Ok(result)
     }
 
-    fn read_rel32_intel(&self, image: &[u8], lo: u32, hi: u32) -> Vec<Reference> {
+    fn read_rel32_intel(&self, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>> {
         let mut result = Vec::new();
-        for &location in &self.rel32_locations[0] {
-            if location < lo {
-                continue;
-            }
-            if location >= hi {
-                break;
-            }
+        let locations = &self.rel32_locations[0];
+        let start = locations.partition_point(|location| *location < lo);
+        let end = locations.partition_point(|location| *location < hi);
+        result
+            .try_reserve(end.saturating_sub(start))
+            .map_err(|_| super::allocation_error("ELF rel32 references"))?;
+        for &location in &locations[start..end] {
             let Some(location_rva) = self.translator.offset_to_rva(location) else { continue };
             let disp = read_i32(image, location as usize).unwrap_or(0);
             let target_rva = location_rva.wrapping_add(4).wrapping_add(disp as u32);
@@ -690,7 +724,7 @@ impl ElfDisassembler {
                 result.push(Reference { location, target });
             }
         }
-        result
+        Ok(result)
     }
 
     fn read_rel32_arm(
@@ -699,15 +733,15 @@ impl ElfDisassembler {
         addr_type: usize,
         lo: u32,
         hi: u32,
-    ) -> Vec<Reference> {
+    ) -> Result<Vec<Reference>> {
         let mut result = Vec::new();
-        for &location in &self.rel32_locations[addr_type] {
-            if location < lo {
-                continue;
-            }
-            if location >= hi {
-                break;
-            }
+        let locations = &self.rel32_locations[addr_type];
+        let start = locations.partition_point(|location| *location < lo);
+        let end = locations.partition_point(|location| *location < hi);
+        result
+            .try_reserve(end.saturating_sub(start))
+            .map_err(|_| super::allocation_error("ELF ARM rel32 references"))?;
+        for &location in &locations[start..end] {
             let Some(instr_rva) = self.translator.offset_to_rva(location) else { continue };
             let target_rva = if self.kind == ElfKind::AArch32 {
                 fetch_and_read_a32(image, addr_type, location, instr_rva)
@@ -720,7 +754,7 @@ impl ElfDisassembler {
                 }
             }
         }
-        result
+        Ok(result)
     }
 
     fn write_reloc(&self, image: &mut [u8], reference: Reference) {
@@ -771,12 +805,12 @@ impl Disassembler for ElfDisassembler {
 
     fn read(&self, group: usize, image: &[u8], lo: u32, hi: u32) -> Result<Vec<Reference>> {
         if group == 0 {
-            return Ok(self.read_relocs(image, lo, hi));
+            return self.read_relocs(image, lo, hi);
         }
         if group == 1 {
-            return Ok(self.read_abs32(image, lo, hi));
+            return self.read_abs32(image, lo, hi);
         }
-        Ok(match self.kind {
+        match self.kind {
             ElfKind::X86 | ElfKind::X64 => self.read_rel32_intel(image, lo, hi),
             ElfKind::AArch32 | ElfKind::AArch64 => {
                 // Group index == address type index + 2 for ARM.
@@ -784,10 +818,10 @@ impl Disassembler for ElfDisassembler {
                 if addr_type < self.rel32_locations.len() {
                     self.read_rel32_arm(image, addr_type, lo, hi)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             }
-        })
+        }
     }
 
     fn write(&self, group: usize, image: &mut [u8], reference: Reference) {

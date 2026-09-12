@@ -80,6 +80,11 @@ impl error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Builds an `AllocationFailure` for a named attacker-influenced allocation.
+pub(crate) fn allocation_error(context: &str) -> Error {
+    Error::new(Status::AllocationFailure, format!("unable to allocate {context}"))
+}
+
 /// A parsed reference type within an executable element.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GroupTraits {
