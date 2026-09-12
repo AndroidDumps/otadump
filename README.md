@@ -1,91 +1,21 @@
-<!-- markdownlint-configure-file {
-  "MD033": false,
-  "MD041": false
-} -->
-
-<div align="center">
-
 # otadump
 
-[![crates.io][crates.io-badge]][crates.io]
+`otadump` is a small Python interface to AOSP's `ota_extractor`. It supports
+full and incremental Android OTA payloads without maintaining a separate delta
+implementation.
 
-**`otadump` helps you extract partitions from Android OTA files.** <br />
-Partitions can be individually flashed to your device using `fastboot`.
-
-Compared to other tools, `otadump` is significantly faster and handles file
-verification - no fear of a bad OTA file bricking your device.
-
-![Demo][demo]
-
-</div>
-
-## Features
-
-|                              | [crazystylus/otadump] | [ssut/payload-dumper-go] | [vm03/payload_dumper]                     |
-| ---------------------------- | --------------------- | ------------------------ | ----------------------------------------- |
-| Input file verification      | ✔                     | ✔                        |                                           |
-| Output file verification     | ✔                     |                          |                                           |
-| Extract selective partitions | ✔                     | ✔                        | ✔                                         |
-| Parallelized extraction      | ✔                     | ✔                        |                                           |
-| Runs directly on .zip files  | ✔                     | ✔                        |                                           |
-| Incremental OTA support      |                       |                          | [Partial][payload_dumper-incremental-ota] |
-
-## Benchmarks
-
-Comparing the time taken to extract all partitions from a few sample files
-(lower is better):
-
-![Benchmarks][benchmarks]
-
-**Note:** `otadump` was run with args `--no-verify -c 12` and `payload-dumper-go` was run with args `-c 12`
-
-System specifications:
-
-- Processor: AMD Ryzen 5 5600X (12) @ 3.700GHz
-- RAM: 16 GiB
-- OS: Pop!_OS 22.04 / Linux 6.0.6
-- SSD: Samsung 970 EVO 250GB
+The package supports Linux x86_64. On first use it downloads a pinned runtime
+bundle containing unmodified files from the official Android 17
+`android17-release` otatools build 14524720. The bundle and every extracted
+file are verified against `otadump/_artifact_lock.json` before execution.
 
 ## Installation
 
-### macOS / Linux
-
-Install a pre-built binary:
-
 ```sh
-curl -sS https://raw.githubusercontent.com/crazystylus/otadump/mainline/install.sh | bash
+python -m pip install .
 ```
-
-Otherwise, using Cargo:
-
-```sh
-# Needs LZMA, Protobuf and pkg-config libraries installed.
-# - On macOS: brew install protobuf xz pkg-config
-# - On Debian / Ubuntu: apt install liblzma-dev protobuf-compiler pkg-config
-cargo install --locked otadump
-```
-
-### Windows
-
-Download the pre-built binary from the [Releases] page. Extract it and run the
-`otadump.exe` file.
 
 ## Usage
-
-Run the following command in your terminal:
-
-```sh
-# Run directly on .zip file.
-otadump ota.zip
-
-# Run on payload.bin file.
-otadump payload.bin
-```
-
-### Python
-
-Build and install the native Python module with `pip` or
-[maturin](https://www.maturin.rs/), then call `otadump.extract`:
 
 ```python
 from pathlib import Path
@@ -95,27 +25,28 @@ import otadump
 otadump.extract(
     Path("payload.bin"),
     Path("output"),
+    source_dir=Path("old-images"),  # Required only for incremental OTAs.
     partitions=["boot", "system"],
-    overwrite=True,
 )
 ```
 
-The optional keyword arguments are `num_threads`, `overwrite`, `partitions`,
-and `verify`. Extraction releases the Python GIL.
+`payload_file` may be a raw `payload.bin` or an OTA ZIP whose `payload.bin` is
+stored without compression, as required by Android OTA packages. Set
+`single_thread=True` to request AOSP's serial extraction mode.
 
-## Contributors
+Extraction failures raise `otadump.OtaDumpError` with the native tool's error
+output. Runtime files are cached under `$XDG_CACHE_HOME/otadump` (or
+`~/.cache/otadump`). Set `OTADUMP_CACHE_DIR` to use another cache location.
 
-- [Kartik Sharma][crazystylus]
-- [Ajeet D'Souza][ajeetdsouza]
+## Provenance
 
-[ajeetdsouza]: https://github.com/ajeetdsouza
-[benchmarks]: contrib/benchmarks.svg
-[crates.io-badge]: https://img.shields.io/crates/v/otadump?logo=rust&logoColor=white&style=flat-square
-[crates.io]: https://crates.io/crates/otadump
-[crazystylus]: https://github.com/crazystylus
-[crazystylus/otadump]: https://github.com/crazystylus/otadump
-[demo]: contrib/demo.gif
-[payload_dumper-incremental-ota]: https://github.com/vm03/payload_dumper/issues/53
-[releases]: https://github.com/crazystylus/otadump/releases
-[ssut/payload-dumper-go]: https://github.com/ssut/payload-dumper-go
-[vm03/payload_dumper]: https://github.com/vm03/payload_dumper
+The runtime is derived from AOSP's official artifact:
+
+- Build: `android17-release` build `14524720`
+- Source tag: `android-17.0.0_r1`
+- `system/update_engine`: `4591637f51644f5429f9e2fe589ab22b92f61842`
+- Upstream SHA-256: `4f8da78667e4bbc49fb993d4d6dca52d09e7cf6ed9fc9a62ebad2647d2dc454c`
+
+The reproducible subset builder is `scripts/build-artifact.py`. It only copies
+the extractor and its runtime shared-library closure; it does not compile or
+modify AOSP code.
