@@ -9,6 +9,11 @@ description = "Extract partitions from Android OTA files"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
+license-files = [
+    "LICENSE",
+    "src/puffin/LICENSE",
+    "licenses/LICENSE.lz4",
+]
 authors = [
     { name = "Kartik Sharma", email = "kartik.sharma522@gmail.com" },
     { name = "Ajeet D'Souza", email = "98ajeet@gmail.com" },
@@ -19,4 +24,8 @@ classifiers = [
 ]
 
 [tool.maturin]
+# Wheels build with the default `release` profile, which keeps `panic =
+# "unwind"` so extraction-thread panics surface as Python exceptions. The
+# `release-cli` profile (panic = "abort") is for the static CLI only.
 features = ["python"]
+locked = true

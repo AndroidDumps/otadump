@@ -1,11 +1,18 @@
-use anyhow::Result;
+use std::process::ExitCode;
+
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use otadump::{ExtractOptions, ProgressReporter};
+use otadump::{CancellationToken, ExtractOptions, ProgressReporter, is_cancellation};
 
-fn main() -> Result<()> {
-    extract();
-    Ok(())
+fn main() -> Result<ExitCode, ctrlc::Error> {
+    let cancellation_token = CancellationToken::new();
+    let signal_token = cancellation_token.clone();
+    ctrlc::set_handler(move || signal_token.cancel())?;
+    let exit_code = extract(&cancellation_token);
+    if cancellation_token.is_cancelled() {
+        return Ok(ExitCode::from(130));
+    }
+    Ok(exit_code)
 }
 
 const HELP_TEMPLATE: &str = color_print::cstr!(
@@ -39,26 +46,37 @@ pub struct Args {
     /// Path to the output directory
     #[clap(long)]
     pub output_dir: String,
+
+    /// Directory containing source partition images for delta payloads
+    #[clap(long)]
+    pub source_dir: Option<String>,
 }
 
-pub fn extract() {
+pub fn extract(cancellation_token: &CancellationToken) -> ExitCode {
     let args = Args::parse();
 
     let reporter = Box::new(CliProgressReporter::new());
     let reporter = reporter.as_ref();
 
-    let result = ExtractOptions::new()
-        .progress_reporter(reporter)
-        .extract(&args.payload_file, &args.output_dir);
+    let mut options = ExtractOptions::new();
+    options.progress_reporter(reporter).cancellation_token(cancellation_token);
+    if let Some(source_dir) = &args.source_dir {
+        options.source_dir(source_dir);
+    }
+    let result = options.extract(&args.payload_file, &args.output_dir);
     reporter.progress_bar.finish_and_clear();
     match result {
         Ok(()) => {
             let message = format!("Extraction complete: {}", args.output_dir);
             reporter.progress_bar.println(message);
+            ExitCode::SUCCESS
         }
         Err(e) => {
-            let message = format!("Error: {e:?}");
-            reporter.progress_bar.println(message);
+            if is_cancellation(e.as_ref()) {
+                return ExitCode::from(130);
+            }
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
         }
     }
 }

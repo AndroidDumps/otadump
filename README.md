@@ -59,9 +59,9 @@ curl -sS https://raw.githubusercontent.com/crazystylus/otadump/mainline/install.
 Otherwise, using Cargo:
 
 ```sh
-# Needs LZMA, Protobuf and pkg-config libraries installed.
-# - On macOS: brew install protobuf xz pkg-config
-# - On Debian / Ubuntu: apt install liblzma-dev protobuf-compiler pkg-config
+# Needs LZMA and pkg-config libraries installed.
+# - On macOS: brew install xz pkg-config
+# - On Debian / Ubuntu: apt install liblzma-dev pkg-config
 cargo install --locked otadump
 ```
 
@@ -80,6 +80,11 @@ otadump ota.zip
 
 # Run on payload.bin file.
 otadump payload.bin
+
+# Apply a SOURCE_COPY, SOURCE_BSDIFF, BROTLI_BSDIFF, PUFFDIFF (inner BSDIFF or
+# ZUCCHINI), standalone ZUCCHINI, or LZ4DIFF (inner BSDIFF or PUFFDIFF) delta
+# payload with matching base images.
+otadump delta.zip --output-dir output --source-dir source-images
 ```
 
 ### Python
@@ -97,11 +102,47 @@ otadump.extract(
     Path("output"),
     partitions=["boot", "system"],
     overwrite=True,
+    source_dir=Path("source-images"),
 )
 ```
 
-The optional keyword arguments are `num_threads`, `overwrite`, `partitions`,
-and `verify`. Extraction releases the Python GIL.
+The optional keyword arguments are `num_threads`, `overwrite`, `partitions`, `verify`, and `source_dir`.
+Set `source_dir` to a directory containing matching base partition images for supported delta operations.
+Extraction generates declared dm-verity hash-tree and FEC extents before verifying each partition.
+Extraction releases the Python GIL.
+
+### Local release packages
+
+Build the Linux x86-64 GNU CLI with `cargo build --profile release-cli --bin otadump --locked`
+(`release-cli` adds `panic = "abort"` on top of `release`; the plain `release`
+profile keeps unwinding so Python wheels can raise panics as exceptions).
+Build the ABI3 Python wheel with `uv build --wheel`.
+The wheel supports Python 3.9 and later and should be produced inside a
+manylinux2014 (manylinux_2_17) environment.
+Release archives and wheels include the notices for vendored Puffin and LZ4 code.
+
+### Native ZUCCHINI artifact fetch (Linux x86-64 GNU builds)
+
+Linux x86-64 GNU builds fetch a pinned native archive when `OTADUMP_NATIVE_DIR`
+is not set. The helper requires Python 3 and enforces an immutable
+`https://raw.githubusercontent.com/AndroidDumps/otadump/<commit>/...` URL from
+`native/zucchini/ARTIFACT_BUNDLE_LOCK.json`.
+
+- `OTADUMP_NATIVE_DIR`: bypass download/cache and use a fully materialized
+  directory containing `include/`, `lib/`, `licenses/`, and `provenance.txt`.
+- `OTADUMP_NATIVE_CACHE`: cache root for the pinned `tar.gz` bundle.
+- `OTADUMP_NATIVE_PRESEED`: local preseed source; either a directory (already
+  extracted tree) or a `.tar.gz` archive copied into cache before verification.
+- `OTADUMP_NATIVE_OFFLINE`: non-empty value disables network fetch. Builds fail
+  if cache/preseed is missing.
+
+Behavior summary:
+
+1. If output already exists, checksums are verified and reused.
+2. Concurrent fetches use a cache lock and unique staging directories; one
+   process atomically wins publication and all contenders verify the winner.
+3. Extraction rejects links/path traversal and rejects extra unpinned files or
+   directories outside the checksum lock.
 
 ## Contributors
 
