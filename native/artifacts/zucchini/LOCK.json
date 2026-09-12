@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "platform": "linux-x86_64-gnu",
+  "artifact": {
+    "path": "native/artifacts/zucchini/zucchini-linux-x86_64-gnu.tar.gz",
+    "sha256": "70655ef27c2327291071590ee726f13cde1abd6f9ed0c3c4dae32103834ef16f"
+  },
+  "contents_lock_sha256": "53aabfa70f3c3061b63017a8d7c5e82bf62aab22c68b6189fdc1c8f99927c31b",
+  "source_lock_sha256": "618c64f7564458ee3eb161c2d127056dfce5220fb17932d79923ecd999ebdd7d",
+  "aosp_commit": "e256025d9d9c906caba814fd7b99a311ac8b8ec1",
+  "builder_image": "quay.io/pypa/manylinux2014_x86_64@sha256:493d2032114d757aaa761a9385ad8497f391503bf71acef9abeeb66682ca5d90"
+}

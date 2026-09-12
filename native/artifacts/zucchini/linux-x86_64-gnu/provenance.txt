@@ -1,0 +1,6 @@
+aosp_commit=e256025d9d9c906caba814fd7b99a311ac8b8ec1
+source_lock_sha256=618c64f7564458ee3eb161c2d127056dfce5220fb17932d79923ecd999ebdd7d
+builder_image=quay.io/pypa/manylinux2014_x86_64@sha256:493d2032114d757aaa761a9385ad8497f391503bf71acef9abeeb66682ca5d90
+compiler=g++ (GCC) 10.2.1 20210130 (Red Hat 10.2.1-11)
+archiver=GNU ar version 2.35-5.el7.4
+tu_count=17
