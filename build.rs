@@ -53,6 +53,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(otadump_zucchini)");
     println!("cargo:rustc-check-cfg=cfg(otadump_native_zucchini)");
     println!("cargo:rerun-if-changed=src/protos/chromeos_update_engine/update_metadata.proto");
+    println!("cargo:rerun-if-env-changed=OTADUMP_NATIVE_ZUCCHINI");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
         && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
