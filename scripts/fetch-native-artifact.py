@@ -8,7 +8,44 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
+import uuid
+from urllib.parse import urlsplit
+
+
+DOWNLOAD_TIMEOUT_SECONDS = 30
+DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
+LOCK_WAIT_SECONDS = 120
+LOCK_POLL_SECONDS = 0.05
+
+
+class FileLock:
+    def __init__(self, path: pathlib.Path, timeout_seconds: float) -> None:
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        self.fd = -1
+
+    def __enter__(self) -> "FileLock":
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, f"{os.getpid()}\n".encode("ascii"))
+                return self
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"timed out waiting for lock: {self.path}")
+                time.sleep(LOCK_POLL_SECONDS)
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -30,7 +67,60 @@ def parse_sha256_lock(path: pathlib.Path) -> dict[str, str]:
     return checksums
 
 
+def validate_bundle_url(url: str, commit: str) -> None:
+    if len(commit) != 40 or any(ch not in "0123456789abcdef" for ch in commit):
+        raise RuntimeError(f"bundle lock commit must be a lowercase 40-char hex SHA: {commit}")
+    parsed = urlsplit(url)
+    if parsed.scheme != "https":
+        raise RuntimeError(f"native artifact URL must use HTTPS: {url}")
+    if parsed.hostname != "raw.githubusercontent.com":
+        raise RuntimeError(
+            "native artifact URL host must be raw.githubusercontent.com: "
+            f"{parsed.hostname or '<missing>'}"
+        )
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("native artifact URL must not include query parameters or fragments")
+    expected_path = (
+        f"/AndroidDumps/otadump/{commit}/native/artifacts/zucchini/"
+        "zucchini-linux-x86_64-gnu.tar.gz"
+    )
+    if parsed.path != expected_path:
+        raise RuntimeError(
+            "native artifact URL path must match the immutable commit artifact path: "
+            f"expected {expected_path}, got {parsed.path}"
+        )
+
+
 def verify_tree(root: pathlib.Path, checksums: dict[str, str]) -> None:
+    expected_files = set(checksums)
+    allowed_dirs = {"."}
+    for relpath in checksums:
+        parent = pathlib.PurePosixPath(relpath).parent
+        while True:
+            allowed_dirs.add(parent.as_posix())
+            if parent == pathlib.PurePosixPath("."):
+                break
+            parent = parent.parent
+
+    discovered_files = set()
+    for candidate in root.rglob("*"):
+        relpath = candidate.relative_to(root).as_posix()
+        if candidate.is_symlink():
+            raise RuntimeError(f"links are not allowed in native artifact tree: {relpath}")
+        if candidate.is_dir():
+            if relpath not in allowed_dirs:
+                raise RuntimeError(f"unexpected native artifact directory: {relpath}")
+            continue
+        if not candidate.is_file():
+            raise RuntimeError(f"unsupported native artifact entry type: {relpath}")
+        if relpath not in expected_files:
+            raise RuntimeError(f"unexpected native artifact file: {relpath}")
+        discovered_files.add(relpath)
+
+    missing = sorted(expected_files - discovered_files)
+    if missing:
+        raise RuntimeError(f"missing native artifact files: {', '.join(missing)}")
+
     for relpath, expected in checksums.items():
         target = root / relpath
         if not target.is_file():
@@ -55,6 +145,35 @@ def safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
         tar.extractall(destination)
 
 
+def download_archive(url: str, archive_path: pathlib.Path) -> None:
+    with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+        header_length = response.headers.get("Content-Length")
+        if header_length is not None:
+            try:
+                if int(header_length) > DOWNLOAD_MAX_BYTES:
+                    raise RuntimeError(
+                        "native artifact archive is too large: "
+                        f"{header_length} bytes exceeds {DOWNLOAD_MAX_BYTES}"
+                    )
+            except ValueError:
+                pass
+        with tempfile.NamedTemporaryFile(delete=False, dir=archive_path.parent) as handle:
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > DOWNLOAD_MAX_BYTES:
+                    raise RuntimeError(
+                        "native artifact archive is too large: "
+                        f"streamed {total} bytes exceeds {DOWNLOAD_MAX_BYTES}"
+                    )
+                handle.write(chunk)
+            temp_name = handle.name
+    pathlib.Path(temp_name).replace(archive_path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle-lock", required=True)
@@ -64,6 +183,7 @@ def main() -> int:
     args = parser.parse_args()
 
     bundle_lock = json.loads(pathlib.Path(args.bundle_lock).read_text(encoding="utf-8"))
+    validate_bundle_url(bundle_lock["url"], bundle_lock["commit"])
     checksums = parse_sha256_lock(pathlib.Path(args.checksum_lock))
     out_dir = pathlib.Path(args.out)
 
@@ -74,6 +194,7 @@ def main() -> int:
     cache_root = pathlib.Path(args.cache)
     cache_root.mkdir(parents=True, exist_ok=True)
     archive_path = cache_root / f"{bundle_lock['sha256']}.tar.gz"
+    fetch_lock = cache_root / f".{bundle_lock['sha256']}.fetch.lock"
 
     preseed = os.environ.get("OTADUMP_NATIVE_PRESEED")
     offline = os.environ.get("OTADUMP_NATIVE_OFFLINE")
@@ -83,25 +204,33 @@ def main() -> int:
         if preseed_path.is_dir():
             verify_tree(preseed_path, checksums)
             out_dir.parent.mkdir(parents=True, exist_ok=True)
-            if out_dir.exists():
-                shutil.rmtree(out_dir)
-            shutil.copytree(preseed_path, out_dir)
+            staging = out_dir.with_name(f"{out_dir.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+            if staging.exists():
+                shutil.rmtree(staging)
+            shutil.copytree(preseed_path, staging)
+            try:
+                os.replace(staging, out_dir)
+            except OSError:
+                if staging.exists():
+                    shutil.rmtree(staging)
+                if out_dir.is_dir():
+                    verify_tree(out_dir, checksums)
+                    return 0
+                raise
             return 0
         if not preseed_path.is_file():
             raise RuntimeError(f"OTADUMP_NATIVE_PRESEED path does not exist: {preseed_path}")
-        shutil.copy2(preseed_path, archive_path)
 
-    if not archive_path.is_file():
-        if offline:
-            raise RuntimeError(
-                "offline native artifact mode is enabled but cache is empty; "
-                "set OTADUMP_NATIVE_PRESEED or unset OTADUMP_NATIVE_OFFLINE"
-            )
-        with urllib.request.urlopen(bundle_lock["url"]) as response:
-            with tempfile.NamedTemporaryFile(delete=False, dir=cache_root) as handle:
-                handle.write(response.read())
-                temp_name = handle.name
-        pathlib.Path(temp_name).replace(archive_path)
+    with FileLock(fetch_lock, LOCK_WAIT_SECONDS):
+        if preseed and pathlib.Path(preseed).is_file():
+            shutil.copy2(pathlib.Path(preseed), archive_path)
+        if not archive_path.is_file():
+            if offline:
+                raise RuntimeError(
+                    "offline native artifact mode is enabled but cache is empty; "
+                    "set OTADUMP_NATIVE_PRESEED or unset OTADUMP_NATIVE_OFFLINE"
+                )
+            download_archive(bundle_lock["url"], archive_path)
 
     archive_digest = sha256_file(archive_path)
     if archive_digest != bundle_lock["sha256"]:
@@ -118,11 +247,19 @@ def main() -> int:
         verify_tree(extracted, checksums)
 
         out_dir.parent.mkdir(parents=True, exist_ok=True)
-        staging = out_dir.with_name(out_dir.name + ".tmp")
+        staging = out_dir.with_name(f"{out_dir.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
         if staging.exists():
             shutil.rmtree(staging)
         shutil.copytree(extracted, staging)
-        os.replace(staging, out_dir)
+        try:
+            os.replace(staging, out_dir)
+        except OSError:
+            if staging.exists():
+                shutil.rmtree(staging)
+            if out_dir.is_dir():
+                verify_tree(out_dir, checksums)
+                return 0
+            raise
 
     return 0
 

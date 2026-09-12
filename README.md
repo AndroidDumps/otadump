@@ -117,9 +117,32 @@ Build the Linux x86-64 GNU CLI with `cargo build --profile release-cli --bin ota
 (`release-cli` adds `panic = "abort"` on top of `release`; the plain `release`
 profile keeps unwinding so Python wheels can raise panics as exceptions).
 Build the ABI3 Python wheel with `uv build --wheel`.
-The wheel supports Python 3.9 and later and uses the build host's glibc baseline.
-Build release packages on the oldest Linux environment that you support.
+The wheel supports Python 3.9 and later and should be produced inside a
+manylinux2014 (manylinux_2_17) environment.
 Release archives and wheels include the notices for vendored Puffin and LZ4 code.
+
+### Native ZUCCHINI artifact fetch (Linux x86-64 GNU builds)
+
+Linux x86-64 GNU builds fetch a pinned native archive when `OTADUMP_NATIVE_DIR`
+is not set. The helper requires Python 3 and enforces an immutable
+`https://raw.githubusercontent.com/AndroidDumps/otadump/<commit>/...` URL from
+`native/zucchini/ARTIFACT_BUNDLE_LOCK.json`.
+
+- `OTADUMP_NATIVE_DIR`: bypass download/cache and use a fully materialized
+  directory containing `include/`, `lib/`, `licenses/`, and `provenance.txt`.
+- `OTADUMP_NATIVE_CACHE`: cache root for the pinned `tar.gz` bundle.
+- `OTADUMP_NATIVE_PRESEED`: local preseed source; either a directory (already
+  extracted tree) or a `.tar.gz` archive copied into cache before verification.
+- `OTADUMP_NATIVE_OFFLINE`: non-empty value disables network fetch. Builds fail
+  if cache/preseed is missing.
+
+Behavior summary:
+
+1. If output already exists, checksums are verified and reused.
+2. Concurrent fetches use a cache lock and unique staging directories; one
+   process atomically wins publication and all contenders verify the winner.
+3. Extraction rejects links/path traversal and rejects extra unpinned files or
+   directories outside the checksum lock.
 
 ## Contributors
 

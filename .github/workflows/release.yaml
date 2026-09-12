@@ -141,3 +141,79 @@ jobs:
             *.zip
           name: ${{ steps.get_version.outputs.value }}
           tag_name: ""
+
+  wheel-linux-abi3:
+    name: wheel manylinux2014 x86_64
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/pypa/manylinux2014_x86_64@sha256:493d2032114d757aaa761a9385ad8497f391503bf71acef9abeeb66682ca5d90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python build tools
+        run: |
+          /opt/python/cp39-cp39/bin/python -m pip install --upgrade pip
+          /opt/python/cp39-cp39/bin/python -m pip install uv maturin auditwheel
+
+      - name: Validate, test, and build wheel in pinned manylinux
+        env:
+          PATH: /opt/python/cp39-cp39/bin:${{ env.PATH }}
+          OTADUMP_NATIVE_CACHE: /tmp/otadump-native-cache
+        run: |
+          set -euxo pipefail
+
+          cargo fmt --all -- --check
+          cargo check --locked
+          cargo test --locked --release --all-features
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+
+          rm -rf "$OTADUMP_NATIVE_CACHE"
+          python3 scripts/fetch-native-artifact.py \
+            --bundle-lock native/zucchini/ARTIFACT_BUNDLE_LOCK.json \
+            --checksum-lock native/zucchini/ARTIFACT_LOCK.sha256 \
+            --out /tmp/otadump-native/linux-x86_64-gnu \
+            --cache "$OTADUMP_NATIVE_CACHE"
+          python3 tests/native_artifact_fetch_test.py
+
+          uv build --wheel
+          auditwheel show dist/*.whl
+          auditwheel repair --wheel-dir wheelhouse dist/*.whl
+
+          python -m venv /tmp/otadump-wheel-smoke
+          source /tmp/otadump-wheel-smoke/bin/activate
+          pip install wheelhouse/*.whl
+          python tests/python_smoke.py
+          python - <<'PY'
+          import pathlib
+          import otadump
+
+          extension = next(pathlib.Path(otadump.__file__).parent.glob("otadump*.so"))
+          print(extension)
+          PY
+
+          SO_PATH=$(python - <<'PY'
+          import pathlib
+          import otadump
+
+          extension = next(pathlib.Path(otadump.__file__).parent.glob("otadump*.so"))
+          print(extension)
+          PY
+          )
+          nm -gD "$SO_PATH" >/tmp/otadump-wheel.nm.txt
+          readelf -d "$SO_PATH" >/tmp/otadump-wheel.readelf.txt
+          ldd "$SO_PATH" >/tmp/otadump-wheel.ldd.txt
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: python-wheel-manylinux2014-x86_64
+          path: |
+            dist/*.whl
+            wheelhouse/*.whl
+            /tmp/otadump-wheel.nm.txt
+            /tmp/otadump-wheel.readelf.txt
+            /tmp/otadump-wheel.ldd.txt
