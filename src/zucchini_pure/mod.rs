@@ -148,9 +148,6 @@ fn apply_inner(
     if patch.header.new_size as usize != output_size {
         return Err(Error::new(Status::WrongOutputSize, "output buffer size does not match patch"));
     }
-    if !patch::check_old_file(&patch.header, old) {
-        return Err(Error::new(Status::ApplyError, "invalid old image"));
-    }
 
     // Reject element formats that Android never emits, matching the native FFI
     // allow-list (NoOp plus Android executables).
@@ -172,7 +169,12 @@ fn apply_inner(
     output.resize(output_size, 0);
 
     // Android hardens upstream apply with an additional preflight. Mirror the
-    // native FFI so unsafe patches are rejected before publication.
+    // native FFI so unsafe patches are rejected before publication. The native
+    // `PreflightAndroidElements` performs the old-file check here too, hence the
+    // preflight-specific message.
+    if !patch::check_old_file(&patch.header, old) {
+        return Err(Error::new(Status::ApplyError, "android executable preflight failed"));
+    }
     for element in &patch.elements {
         check()?;
         engine::preflight_element(old, element, &mut output, cancelled).map_err(|_| {
@@ -186,7 +188,7 @@ fn apply_inner(
     }
 
     if !patch::check_new_file(&patch.header, &output) {
-        return Err(Error::new(Status::ApplyError, "invalid new image"));
+        return Err(Error::new(Status::ApplyError, "zucchini apply failed"));
     }
     Ok(output)
 }

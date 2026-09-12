@@ -51,15 +51,23 @@ const LZ4_SOURCES: &[&str] = &[
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(otadump_lz4)");
     println!("cargo:rustc-check-cfg=cfg(otadump_zucchini)");
+    println!("cargo:rustc-check-cfg=cfg(otadump_native_zucchini)");
     println!("cargo:rerun-if-changed=src/protos/chromeos_update_engine/update_metadata.proto");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
         && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
     {
         build_lz4();
-        build_zucchini();
         println!("cargo:rustc-cfg=otadump_lz4");
-        println!("cargo:rustc-cfg=otadump_zucchini");
+    }
+
+    // Zucchini is implemented in pure Rust (`src/zucchini_pure`). The vendored
+    // C++/libchrome implementation is retained only for differential testing,
+    // enabled explicitly with `OTADUMP_NATIVE_ZUCCHINI=1`.
+    println!("cargo:rustc-cfg=otadump_zucchini");
+    if std::env::var_os("OTADUMP_NATIVE_ZUCCHINI").is_some() {
+        build_zucchini();
+        println!("cargo:rustc-cfg=otadump_native_zucchini");
     }
 
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("unable to find vendored protoc");
