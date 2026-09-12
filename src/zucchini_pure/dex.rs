@@ -997,7 +997,7 @@ impl Disassembler for DexDisassembler {
         };
         let proto_index = ItemMapper::TargetIndex { map: self.proto_map, item_size: 12, width: 2 };
         match group {
-            0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(2), false),
+            0 => item_reader(image, lo, hi, self.type_map, 4, 0, string_index(4), false),
             1 => item_reader(image, lo, hi, self.proto_map, 12, 0, string_index(4), false),
             2 => item_reader(image, lo, hi, self.field_map, 8, 4, string_index(4), false),
             3 => item_reader(image, lo, hi, self.method_map, 8, 4, string_index(4), false),
