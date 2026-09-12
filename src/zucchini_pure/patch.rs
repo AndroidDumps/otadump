@@ -134,16 +134,24 @@ impl<'a> Cursor<'a> {
         Some(value)
     }
 
-    /// Decodes a `uint32_t` base-128 varint, mirroring `DecodeVarUInt`.
+    /// Decodes a `uint32_t` base-128 varint, mirroring `DecodeVarUInt`. On
+    /// failure the cursor is left unchanged, matching `ParseVarUInt`, which only
+    /// consumes bytes when decoding succeeds.
     fn var_u32(&mut self) -> Option<u32> {
+        let start = self.pos;
         let mut value = 0u32;
         for shift in (0..32).step_by(7) {
-            let byte = self.u8()?;
+            let Some(&byte) = self.data.get(self.pos) else {
+                self.pos = start;
+                return None;
+            };
+            self.pos += 1;
             value |= u32::from(byte & 0x7F) << shift;
             if byte < 0x80 {
                 return Some(value);
             }
         }
+        self.pos = start;
         None
     }
 

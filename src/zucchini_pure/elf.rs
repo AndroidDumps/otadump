@@ -475,24 +475,24 @@ impl ElfDisassembler {
                             cursor += step;
                             continue;
                         };
-                        let found = if is_thumb2 {
-                            scan_thumb2(image, instr_rva, location)
-                        } else {
-                            scan_arm32(image, instr_rva, location)
-                        };
-                        match found {
-                            Some((addr_type, target_rva, instr_size)) => {
-                                if let Some(target_offset) = self.translator.rva_to_offset(target_rva)
-                                {
-                                    if self.is_target_in_exec_section(target_offset) {
-                                        self.rel32_locations[addr_type as usize]
-                                            .push(location);
-                                    }
-                                }
-                                cursor += instr_size as usize;
+                        let advancement = if is_thumb2 {
+                            let (found, size) =
+                                scan_thumb2(image, instr_rva, location, gap_end - cursor);
+                            if let Some((addr_type, target_rva)) = found {
+                                self.record_arm_rel32(addr_type, target_rva, location);
                             }
-                            None => cursor += step,
-                        }
+                            size
+                        } else {
+                            if let Some((addr_type, target_rva, _)) =
+                                scan_arm32(image, instr_rva, location)
+                            {
+                                self.record_arm_rel32(addr_type, target_rva, location);
+                            }
+                            4
+                        };
+                        // Native always advances by the decoded instruction size,
+                        // including when no reference type matches.
+                        cursor += advancement as usize;
                     }
                 }
                 ElfKind::AArch64 => {
@@ -518,6 +518,14 @@ impl ElfDisassembler {
                     }
                 }
                 _ => unreachable!(),
+            }
+        }
+    }
+
+    fn record_arm_rel32(&mut self, addr_type: u8, target_rva: u32, location: u32) {
+        if let Some(target_offset) = self.translator.rva_to_offset(target_rva) {
+            if self.is_target_in_exec_section(target_offset) {
+                self.rel32_locations[addr_type as usize].push(location);
             }
         }
     }
@@ -944,7 +952,8 @@ fn parse_elf_header(
     if sections_end > image.len() {
         return None;
     }
-    let mut sections = Vec::with_capacity(sections_count);
+    let mut sections = Vec::new();
+    sections.try_reserve(sections_count).ok()?;
     for index in 0..sections_count {
         let base = sections_start + index * shdr_size;
         sections.push(parse_shdr(kind, image, base)?);
@@ -979,11 +988,15 @@ fn parse_elf_header(
     for index in 0..segments_count {
         let base = segments_start + index * phdr_size;
         let (p_offset, p_filesz) = parse_phdr(kind, image, base)?;
+        // Validate the original 64-bit values before narrowing to offset_t.
         let segment_end = p_offset.checked_add(p_filesz)?;
-        if segment_end > image.len() as u32 {
+        if segment_end > u64::from(u32::MAX) {
             return None;
         }
-        offset_bound = offset_bound.max(segment_end);
+        if !region_fits(p_offset, p_filesz, image.len() as u64) {
+            return None;
+        }
+        offset_bound = offset_bound.max(segment_end as u32);
     }
 
     Some((sections, offset_bound))
@@ -1011,11 +1024,11 @@ fn parse_shdr(kind: ElfKind, image: &[u8], base: usize) -> Option<SectionHeader>
     }
 }
 
-fn parse_phdr(kind: ElfKind, image: &[u8], base: usize) -> Option<(u32, u32)> {
+fn parse_phdr(kind: ElfKind, image: &[u8], base: usize) -> Option<(u64, u64)> {
     if kind.class() == 2 {
-        Some((read_u64(image, base + 8)? as u32, read_u64(image, base + 32)? as u32))
+        Some((read_u64(image, base + 8)?, read_u64(image, base + 32)?))
     } else {
-        Some((read_u32(image, base + 4)?, read_u32(image, base + 16)?))
+        Some((u64::from(read_u32(image, base + 4)?), u64::from(read_u32(image, base + 16)?)))
     }
 }
 
@@ -1088,26 +1101,37 @@ fn scan_arm32(image: &[u8], instr_rva: u32, location: u32) -> Option<(u8, u32, u
 }
 
 /// Returns `(addr_type, target_rva, instruction_size)` for THUMB2 mode.
-fn scan_thumb2(image: &[u8], instr_rva: u32, location: u32) -> Option<(u8, u32, u32)> {
+/// Returns `(reference, instruction_size)` for THUMB2. Native always advances
+/// by the decoded instruction size, even when no reference type matches.
+fn scan_thumb2(
+    image: &[u8],
+    instr_rva: u32,
+    location: u32,
+    available: usize,
+) -> (Option<(u8, u32)>, u32) {
     let code16 = arm::fetch_thumb2_code16(image, location);
     let instr_size = arm::get_thumb2_instruction_size(code16);
     if instr_size == 2 {
         if let Some(target) = arm::read_t8(instr_rva, code16) {
-            return Some((1, target, 2));
+            return (Some((1, target)), 2);
         }
         if let Some(target) = arm::read_t11(instr_rva, code16) {
-            return Some((2, target, 2));
+            return (Some((2, target)), 2);
         }
-        return None;
+        return (None, 2);
+    }
+    if available < 4 {
+        // Native does not fetch the second half if it lies outside the region.
+        return (None, 4);
     }
     let code32 = arm::fetch_thumb2_code32(image, location);
     if let Some(target) = arm::read_t20(instr_rva, code32) {
-        return Some((3, target, 4));
+        return (Some((3, target)), 4);
     }
     if let Some(target) = arm::read_t24(instr_rva, code32) {
-        return Some((4, target, 4));
+        return (Some((4, target)), 4);
     }
-    None
+    (None, 4)
 }
 
 fn scan_aarch64(image: &[u8], instr_rva: u32, location: u32) -> Option<(u8, u32)> {
@@ -1222,4 +1246,57 @@ fn _keep_helpers() {
     let _ = range_is_bounded;
     let _ = K_INVALID_OFFSET;
     let _ = OFFSET_BOUND;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumb2_unknown_32bit_reports_size_four() {
+        // code16 = 0xF800 selects a 32-bit THUMB2 instruction; the resulting
+        // code32 matches neither T20 nor T24, so it is advanced past in full.
+        let image = [0x00u8, 0xF8, 0x00, 0x00];
+        let (found, size) = scan_thumb2(&image, 0, 0, 4);
+        assert!(found.is_none());
+        assert_eq!(size, 4);
+    }
+
+    #[test]
+    fn thumb2_truncated_32bit_does_not_fetch() {
+        let image = [0x00u8, 0xF8, 0x00];
+        let (found, size) = scan_thumb2(&image, 0, 0, 2);
+        assert!(found.is_none());
+        assert_eq!(size, 4);
+    }
+
+    fn minimal_elf64(p_offset: u64, p_filesz: u64) -> Vec<u8> {
+        let mut image = vec![0u8; 64 + 56 + 64];
+        image[..4].copy_from_slice(b"\x7FELF");
+        image[4] = 2; // ELFCLASS64
+        image[5] = 1; // ELFDATA2LSB
+        image[6] = 1; // EV_CURRENT
+        image[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        image[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        image[20..24].copy_from_slice(&1u32.to_le_bytes());
+        image[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        image[40..48].copy_from_slice(&120u64.to_le_bytes()); // e_shoff
+        image[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        image[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+        image[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        image[60..62].copy_from_slice(&1u16.to_le_bytes()); // e_shnum
+        // Section 0 stays a zeroed SHT_NULL entry.
+        image[72..80].copy_from_slice(&p_offset.to_le_bytes());
+        image[96..104].copy_from_slice(&p_filesz.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn elf64_program_header_bounds_are_validated_as_u64() {
+        assert!(parse_elf_header(ElfKind::X64, &minimal_elf64(0x80, 0x10)).is_some());
+        // 2^32 offsets must not truncate to a small valid-looking value.
+        assert!(parse_elf_header(ElfKind::X64, &minimal_elf64(0x1_0000_0000, 0x10)).is_none());
+        // A segment extending past the image must fail too.
+        assert!(parse_elf_header(ElfKind::X64, &minimal_elf64(0x80, 0x1000)).is_none());
+    }
 }

@@ -122,10 +122,14 @@ const BYTECODE: &[(u8, u8, Format, u8)] = &[
 ];
 
 fn find_instruction(opcode: u8) -> Option<Bytecode> {
+    // Widening to `u16` matters: the final entry starts at 0xFF with variant 1,
+    // and `u8` arithmetic would wrap `0xFF + 1` to 0, making opcode 0xFF
+    // (const-method-type) unreachable.
+    let opcode = u16::from(opcode);
     BYTECODE
         .iter()
         .find(|(start, _, _, variant)| {
-            opcode >= *start && opcode < start.wrapping_add(*variant)
+            opcode >= u16::from(*start) && opcode < u16::from(*start) + u16::from(*variant)
         })
         .map(|(_, layout, format, _)| Bytecode { layout: *layout, format: *format })
 }
@@ -189,7 +193,8 @@ impl DexDisassembler {
             return None;
         }
         let items_start = list_start.checked_add(4)?;
-        let items_end = items_start.checked_add(list_size as usize * MAP_ITEM_SIZE)?;
+        let items_end =
+            items_start.checked_add((list_size as usize).checked_mul(MAP_ITEM_SIZE)?)?;
         if items_end > image.len() {
             return None;
         }
@@ -289,7 +294,7 @@ pub(crate) fn read_map_item(image: &[u8], desired: u16) -> Option<MapItem> {
     let list_start = map_off as usize;
     let count = read_u32(image, list_start)?;
     let items_start = list_start.checked_add(4)?;
-    let items_end = items_start.checked_add(count as usize * MAP_ITEM_SIZE)?;
+    let items_end = items_start.checked_add((count as usize).checked_mul(MAP_ITEM_SIZE)?)?;
     if items_end > image.len() {
         return None;
     }
@@ -413,7 +418,8 @@ fn parse_code_item_offsets(image: &[u8], code_map: MapItem) -> Option<Vec<u32>> 
         return None;
     }
     let mut parser = CodeItemParser::new(code_map.offset as usize);
-    let mut offsets = Vec::with_capacity(code_map.size as usize);
+    let mut offsets = Vec::new();
+    offsets.try_reserve(code_map.size as usize).ok()?;
     for _ in 0..code_map.size {
         offsets.push(parser.get_next(image)?);
     }
@@ -781,8 +787,11 @@ fn parse_instructions(image: &[u8], base_offset: u32) -> Vec<InstructionValue> {
         }
         if opcode == 0x26 || opcode == 0x2B || opcode == 0x2C {
             let payload_rel = read_i32(image, pos + 2).unwrap_or(0);
+            // The native bound is relative to the remaining instruction bytes
+            // from the current instruction, not the whole code item.
+            let remaining_units = (insns_end - pos) as u32 / 2;
             if payload_rel < i32::from(instruction.layout)
-                || payload_rel as u32 >= (insns_end - insns_start) as u32 / 2
+                || payload_rel as u32 >= remaining_units
             {
                 break;
             }
@@ -1316,5 +1325,46 @@ impl Disassembler for DexDisassembler {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opcode_ff_resolves_to_const_method_type() {
+        // Regression: `0xFF + variant` must not wrap in `u8` arithmetic.
+        let instruction = find_instruction(0xFF).expect("opcode 0xFF must be known");
+        assert_eq!(instruction.layout, 2);
+        assert_eq!(instruction.format, Format::C);
+
+        // Boundary of the 0xD8..=0xE2 variant range must not leak into 0xE3.
+        assert_eq!(find_instruction(0xE2).unwrap().layout, 2);
+        assert!(find_instruction(0xE3).is_none());
+    }
+
+    #[test]
+    fn const_method_type_maps_to_proto_reference() {
+        let value = InstructionValue { instr_offset: 0x40, opcode: 0xFF, format: Format::C };
+        assert_eq!(filter_location(CodeFilter::Proto, value), Some(0x42));
+    }
+
+    #[test]
+    fn payload_bound_is_relative_to_remaining_instructions() {
+        // 10 instruction units: `nop` then `fill-array-data` with payload
+        // offset 9. That offset is valid against the whole item (10 units) but
+        // not against the remaining 9 units, so native stops before emitting it.
+        let mut image = vec![0u8; CODE_ITEM_HEADER + 20];
+        image[12..16].copy_from_slice(&10u32.to_le_bytes()); // insns_size
+        image[16] = 0x00; // nop
+        image[17] = 0x00;
+        image[18] = 0x26; // fill-array-data (3 units)
+        image[19] = 0x00; // vAA
+        image[20..24].copy_from_slice(&9i32.to_le_bytes()); // payload offset
+
+        let instructions = parse_instructions(&image, 0);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].opcode, 0x00);
     }
 }

@@ -103,7 +103,9 @@ pub(crate) fn preflight_element(
         .ok_or_else(|| apply_error("failed to create old disassembler"))?;
     let new_disasm = make_disassembler(exe_type, new_element)
         .ok_or_else(|| apply_error("failed to create new disassembler"))?;
-    if old_disasm.size() != old_element.len() as u32 {
+    if old_disasm.size() != old_element.len() as u32
+        || new_disasm.size() != new_element.len() as u32
+    {
         return Err(apply_error("disassembler and element size mismatch"));
     }
     let new_size = new_element.len() as u32;
@@ -450,7 +452,9 @@ fn apply_references_correction(
         }
     }
 
-    if deltas.next().is_some() {
+    // Match `ReferenceDeltaSource::Done()`: unconsumed malformed trailing bytes
+    // are a trailing-reference-delta error even if every needed delta decoded.
+    if deltas.next().is_some() || !element.reference_deltas_done {
         return Err(apply_error("found trailing reference delta"));
     }
     Ok(())

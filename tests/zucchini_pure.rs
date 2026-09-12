@@ -68,3 +68,91 @@ fn pure_rust_rejects_truncated_patch() {
     let error = zucchini_pure::apply(&old, &patch[..patch.len() - 1], 5).unwrap_err();
     assert_eq!(error.status(), Status::InvalidPatch);
 }
+
+fn var_u32(mut value: u32, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn var_i32(value: i32, out: &mut Vec<u8>) {
+    let encoded = if value < 0 { (((!value) as u32) << 1) | 1 } else { (value as u32) << 1 };
+    var_u32(encoded, out);
+}
+
+fn push_buffer(out: &mut Vec<u8>, data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (index, entry) in table.iter_mut().enumerate() {
+        let mut r = index as u32;
+        for _ in 0..8 {
+            r = (r >> 1) ^ (0xEDB8_8320 & (!((r & 1).wrapping_sub(1))));
+        }
+        *entry = r;
+    }
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc = table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+/// Builds a single-element NoOp patch whose reference-delta stream is
+/// `reference_delta`.
+fn build_noop_patch(old: &[u8], new: &[u8], reference_delta: &[u8]) -> Vec<u8> {
+    let mut patch = Vec::new();
+    patch.extend_from_slice(b"Zucc");
+    patch.extend_from_slice(&1u16.to_le_bytes());
+    patch.extend_from_slice(&0u16.to_le_bytes());
+    patch.extend_from_slice(&(old.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&crc32(old).to_le_bytes());
+    patch.extend_from_slice(&(new.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&crc32(new).to_le_bytes());
+    patch.extend_from_slice(&1u32.to_le_bytes());
+
+    patch.extend_from_slice(&0u32.to_le_bytes());
+    patch.extend_from_slice(&(old.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&0u32.to_le_bytes());
+    patch.extend_from_slice(&(new.len() as u32).to_le_bytes());
+    patch.extend_from_slice(&u32::from_le_bytes(*b"NoOp").to_le_bytes());
+    patch.extend_from_slice(&1u16.to_le_bytes());
+
+    let mut src_skip = Vec::new();
+    var_i32(0, &mut src_skip);
+    let mut dst_skip = Vec::new();
+    var_u32(0, &mut dst_skip);
+    let mut copy_count = Vec::new();
+    var_u32(old.len() as u32, &mut copy_count);
+    push_buffer(&mut patch, &src_skip);
+    push_buffer(&mut patch, &dst_skip);
+    push_buffer(&mut patch, &copy_count);
+
+    push_buffer(&mut patch, &new[old.len()..]);
+    push_buffer(&mut patch, &[]); // raw delta skip
+    push_buffer(&mut patch, &[]); // raw delta diff
+    push_buffer(&mut patch, reference_delta);
+    patch.extend_from_slice(&0u32.to_le_bytes());
+    patch
+}
+
+#[test]
+fn pure_rust_rejects_malformed_trailing_reference_delta() {
+    let old = b"ABCD";
+    let new = b"ABCDE";
+
+    // A well-formed empty stream applies cleanly for NoOp elements.
+    let valid = build_noop_patch(old, new, &[]);
+    assert_eq!(zucchini_pure::apply(old, &valid, new.len()).unwrap(), new.to_vec());
+
+    // An unterminated varint must be rejected like the native Done() semantics,
+    // even though a NoOp element needs no reference deltas at all.
+    let malformed = build_noop_patch(old, new, &[0x80]);
+    let error = zucchini_pure::apply(old, &malformed, new.len()).unwrap_err();
+    assert_eq!(error.status(), Status::ApplyError);
+}
