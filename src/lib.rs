@@ -308,7 +308,7 @@ impl<'a> ExtractOptions<'a> {
                             error
                         } else {
                             error.context(format!(
-                                "Failed to generate hash tree for {:?}",
+                                "Failed to generate verity data for {:?}",
                                 update.partition_name
                             ))
                         }

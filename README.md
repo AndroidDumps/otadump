@@ -109,6 +109,7 @@ otadump.extract(
 
 The optional keyword arguments are `num_threads`, `overwrite`, `partitions`, `verify`, and `source_dir`.
 Set `source_dir` to a directory containing matching base partition images for supported delta operations.
+Extraction generates declared dm-verity hash-tree and FEC extents before verifying each partition.
 Extraction releases the Python GIL.
 
 ## Contributors

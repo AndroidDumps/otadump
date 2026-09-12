@@ -1336,37 +1336,163 @@ fn malformed_verity_layouts_fail_without_leaving_staging_files() {
 }
 
 #[test]
-fn fec_metadata_fails_explicitly_without_publishing_an_image() {
-    let temporary = TempDir::new().unwrap();
-    let output_dir = temporary.path().join("output");
-    let data = vec![0x5a; 128];
-    let manifest = DeltaArchiveManifest {
-        block_size: Some(128),
-        minor_version: Some(6),
-        partitions: vec![PartitionUpdate {
+fn fec_extents_match_android_reference_vectors() {
+    for (blocks, fixture, roots) in
+        [(1usize, "fec-one-block.bin", None), (300usize, "fec-300-block.bin", Some(2))]
+    {
+        let temporary = TempDir::new().unwrap();
+        let output_dir = temporary.path().join("output");
+        let data = if blocks == 1 {
+            vec![1; 4096]
+        } else {
+            (0..blocks * 4096)
+                .map(|index| ((index % 4096) * 37 + (index / 4096) * 53 + 13) as u8)
+                .collect()
+        };
+        let fec = fs::read(Path::new("tests/fixtures/fec").join(fixture)).unwrap();
+        let mut target = data.clone();
+        target.extend_from_slice(&fec);
+        let manifest = DeltaArchiveManifest {
+            block_size: Some(4096),
+            minor_version: Some(6),
+            partitions: vec![PartitionUpdate {
+                partition_name: "vendor".into(),
+                new_partition_info: Some(partition_info(&target)),
+                operations: vec![InstallOperation {
+                    operation_type: 0,
+                    data_offset: Some(0),
+                    data_length: Some(data.len() as u64),
+                    dst_extents: vec![extent(0, blocks as u64)],
+                    ..Default::default()
+                }],
+                fec_data_extent: Some(extent(0, blocks as u64)),
+                fec_extent: Some(extent(blocks as u64, (fec.len() / 4096) as u64)),
+                fec_roots: roots,
+                ..Default::default()
+            }],
+        };
+        let payload = temporary.path().join("payload.bin");
+        write_payload(&payload, manifest, &data);
+
+        ExtractOptions::new().extract(&payload, &output_dir).unwrap();
+
+        assert_eq!(fs::read(output_dir.join("vendor.img")).unwrap(), target);
+        assert_eq!(fs::read_dir(&output_dir).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn malformed_fec_metadata_fails_without_publishing_an_image() {
+    for (
+        data_extent,
+        storage_extent,
+        roots,
+        partition_blocks,
+        operation_blocks,
+        hash_tree,
+        error,
+    ) in [
+        (Some(extent(0, 1)), None, Some(2), 3, 1, false, "FEC data and storage"),
+        (Some(extent(0, 1)), Some(extent(1, 2)), Some(0), 3, 1, false, "FEC roots"),
+        (Some(extent(0, 1)), Some(extent(1, 2)), Some(255), 3, 1, false, "FEC roots"),
+        (Some(extent(0, 1)), Some(extent(1, 1)), Some(2), 2, 1, false, "FEC size mismatch"),
+        (
+            Some(extent(0, 1)),
+            Some(extent(0, 2)),
+            Some(2),
+            2,
+            1,
+            false,
+            "FEC storage extent must follow",
+        ),
+        (
+            Some(extent(2, 1)),
+            Some(extent(0, 2)),
+            Some(2),
+            3,
+            1,
+            false,
+            "FEC storage extent must follow",
+        ),
+        (
+            Some(extent(0, 1)),
+            Some(extent(2, 2)),
+            Some(2),
+            3,
+            1,
+            false,
+            "FEC storage extent exceeds partition size",
+        ),
+        (
+            Some(extent(0, 1)),
+            Some(extent(1, 2)),
+            Some(2),
+            3,
+            3,
+            false,
+            "FEC storage extent overlaps destination extents",
+        ),
+        (
+            Some(extent(0, 1)),
+            Some(extent(1, 2)),
+            Some(2),
+            3,
+            1,
+            true,
+            "FEC storage extent overlaps hash tree extent",
+        ),
+        (
+            Some(extent(0, 1)),
+            Some(extent(1, 2)),
+            Some(2),
+            4,
+            1,
+            true,
+            "FEC storage extent overlaps hash tree data extent",
+        ),
+    ] {
+        let temporary = TempDir::new().unwrap();
+        let output_dir = temporary.path().join("output");
+        let data = vec![0x5a; operation_blocks * 4096];
+        let mut update = PartitionUpdate {
             partition_name: "vendor".into(),
-            new_partition_info: Some(partition_info(&vec![0; 256])),
+            new_partition_info: Some(partition_info(&vec![0; partition_blocks * 4096])),
             operations: vec![InstallOperation {
                 operation_type: 0,
                 data_offset: Some(0),
-                data_length: Some(128),
-                dst_extents: vec![extent(0, 1)],
+                data_length: Some(data.len() as u64),
+                dst_extents: vec![extent(0, operation_blocks as u64)],
                 ..Default::default()
             }],
-            fec_data_extent: Some(extent(0, 1)),
-            fec_extent: Some(extent(1, 1)),
-            fec_roots: Some(2),
+            fec_data_extent: data_extent,
+            fec_extent: storage_extent,
+            fec_roots: roots,
             ..Default::default()
-        }],
-    };
-    let payload = temporary.path().join("payload.bin");
-    write_payload(&payload, manifest, &data);
+        };
+        if hash_tree {
+            if partition_blocks == 4 {
+                update.hash_tree_data_extent = Some(extent(0, 3));
+                update.hash_tree_extent = Some(extent(3, 1));
+            } else {
+                update.hash_tree_data_extent = Some(extent(0, 1));
+                update.hash_tree_extent = Some(extent(1, 1));
+            }
+            update.hash_tree_algorithm = Some("sha256".into());
+        }
+        let manifest = DeltaArchiveManifest {
+            block_size: Some(4096),
+            minor_version: Some(6),
+            partitions: vec![update],
+        };
+        let payload = temporary.path().join("payload.bin");
+        write_payload(&payload, manifest, &data);
 
-    let error = ExtractOptions::new().extract(&payload, &output_dir).unwrap_err().to_string();
+        let actual = ExtractOptions::new().extract(&payload, &output_dir).unwrap_err().to_string();
 
-    assert!(error.contains("FEC generation is not supported"), "unexpected error: {error}");
-    assert!(!output_dir.join("vendor.img").exists());
-    assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+        assert!(actual.contains(error), "unexpected error: {actual}");
+        assert!(!output_dir.join("vendor.img").exists());
+        assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+    }
 }
 
 #[test]
