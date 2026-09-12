@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "commit": "9534f6e24296b1682d53cdac19da0b81fc97fcbc",
+  "url": "https://raw.githubusercontent.com/AndroidDumps/otadump/9534f6e24296b1682d53cdac19da0b81fc97fcbc/native/artifacts/zucchini/zucchini-linux-x86_64-gnu.tar.gz",
+  "sha256": "70655ef27c2327291071590ee726f13cde1abd6f9ed0c3c4dae32103834ef16f",
+  "extract_root": "linux-x86_64-gnu"
+}
