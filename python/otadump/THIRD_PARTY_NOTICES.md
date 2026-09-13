@@ -18,14 +18,14 @@ downloaded executable, not to otadump's MIT-licensed source.
 | LineageOS ota_extractor changes | https://github.com/LineageOS/android_system_update_engine | https://github.com/LineageOS/android_system_update_engine/blob/lineage-23.2/NOTICE |
 | AOSP update_engine | https://android.googlesource.com/platform/system/update_engine/ | https://android.googlesource.com/platform/system/update_engine/+/refs/heads/main/NOTICE |
 | Android libbase | https://android.googlesource.com/platform/system/libbase/ | https://android.googlesource.com/platform/system/libbase/+/refs/heads/main/NOTICE |
-| Android core/cpu features and extras | https://android.googlesource.com/platform/system/core/ | https://android.googlesource.com/platform/system/core/+/refs/heads/main/NOTICE |
+| Android core/cpu features and extras | https://android.googlesource.com/platform/system/core/ | https://www.apache.org/licenses/LICENSE-2.0.txt |
 | Abseil C++ | https://android.googlesource.com/platform/external/abseil-cpp/ | https://android.googlesource.com/platform/external/abseil-cpp/+/refs/heads/main/LICENSE |
 | BoringSSL | https://android.googlesource.com/platform/external/boringssl/ | https://android.googlesource.com/platform/external/boringssl/+/refs/heads/main/LICENSE |
 | bsdiff | https://android.googlesource.com/platform/external/bsdiff/ | https://android.googlesource.com/platform/external/bsdiff/+/refs/heads/main/LICENSE |
 | Brotli | https://android.googlesource.com/platform/external/brotli/ | https://android.googlesource.com/platform/external/brotli/+/refs/heads/main/LICENSE |
 | bzip2 | https://android.googlesource.com/platform/external/bzip2/ | https://android.googlesource.com/platform/external/bzip2/+/refs/heads/main/LICENSE |
 | gflags | https://android.googlesource.com/platform/external/gflags/ | https://android.googlesource.com/platform/external/gflags/+/refs/heads/main/COPYING.txt |
-| libchrome | https://android.googlesource.com/platform/external/libchrome/ | https://android.googlesource.com/platform/external/libchrome/+/refs/heads/main/LICENSE |
+| libchrome | https://android.googlesource.com/platform/external/libchrome/ | https://android.googlesource.com/platform/external/libchrome/+/refs/heads/main/NOTICE |
 | Protocol Buffers | https://android.googlesource.com/platform/external/protobuf/ | https://android.googlesource.com/platform/external/protobuf/+/refs/heads/main/LICENSE |
 | Puffin | https://android.googlesource.com/platform/external/puffin/ | https://android.googlesource.com/platform/external/puffin/+/refs/heads/main/LICENSE |
 | XZ Embedded | https://android.googlesource.com/platform/external/xz-embedded/ | https://android.googlesource.com/platform/external/xz-embedded/+/refs/heads/main/COPYING (0BSD) |

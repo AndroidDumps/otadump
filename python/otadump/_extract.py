@@ -213,7 +213,6 @@ def _publish(
         try:
             for image, destination, saved, had_original in reversed(publications):
                 if saved.exists():
-                    destination.unlink(missing_ok=True)
                     os.replace(saved, destination)
                 elif not had_original and not image.exists():
                     destination.unlink(missing_ok=True)
