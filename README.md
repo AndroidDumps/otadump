@@ -103,6 +103,11 @@ otadump.extract(
 The optional keyword arguments are `num_threads`, `overwrite`, `partitions`,
 and `verify`. Extraction releases the Python GIL.
 
+Incremental OTAs are supported on Linux x86_64 by passing `source_dir`. This
+path keeps the Rust CLI/full-OTA extractor unchanged and calls a SHA-pinned
+LineageOS `ota_extractor` downloaded at runtime. The binary is not bundled;
+see `python/otadump/THIRD_PARTY_NOTICES.md` for provenance and notices.
+
 ## Contributors
 
 - [Kartik Sharma][crazystylus]
