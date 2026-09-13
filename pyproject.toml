@@ -1,28 +1,26 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
 
 [project]
 name = "otadump"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Extract partitions from Android OTA files"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license = "MIT"
 authors = [
     { name = "Kartik Sharma", email = "kartik.sharma522@gmail.com" },
     { name = "Ajeet D'Souza", email = "98ajeet@gmail.com" },
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Rust",
 ]
 
-[project.urls]
-Repository = "https://github.com/AndroidDumps/otadump"
-
-[tool.hatch.build.targets.wheel]
-packages = ["otadump"]
-
-[tool.hatch.build.targets.sdist]
-include = ["/otadump", "/tests", "/AGENTS.md", "/LICENSE", "/README.md", "/pyproject.toml"]
+[tool.maturin]
+features = ["python"]
+module-name = "otadump._native"
+python-source = "python"
+include = ["python/otadump/_artifact_lock.json", "python/otadump/THIRD_PARTY_NOTICES.md"]
+exclude = ["python/**/__pycache__/**", "python/**/*.pyc"]

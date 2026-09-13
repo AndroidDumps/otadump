@@ -1,0 +1,7 @@
+{
+  "repository": "LineageOS/android_prebuilts_extract-tools",
+  "commit": "a8aabbbe42bdecba4c6d1a9e6e71fbc47de59f96",
+  "url": "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/a8aabbbe42bdecba4c6d1a9e6e71fbc47de59f96/linux-x86/bin/ota_extractor",
+  "sha256": "7cf65d6c557cc6e761082e88aa225123d445be26dd1a18f618f87c142afaff8c",
+  "size": 20650520
+}
