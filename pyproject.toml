@@ -7,7 +7,7 @@ name = "otadump"
 dynamic = ["version"]
 description = "Extract partitions from Android OTA files"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 license = "MIT"
 authors = [
     { name = "Kartik Sharma", email = "kartik.sharma522@gmail.com" },
@@ -20,3 +20,7 @@ classifiers = [
 
 [tool.maturin]
 features = ["python"]
+module-name = "otadump._native"
+python-source = "python"
+include = ["python/otadump/THIRD_PARTY_NOTICES.md"]
+exclude = ["python/**/__pycache__/**", "python/**/*.pyc"]
