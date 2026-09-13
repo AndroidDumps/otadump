@@ -46,7 +46,7 @@ fn extract(
 }
 
 #[pymodule]
-fn otadump(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("OtaDumpError", module.py().get_type::<OtaDumpError>())?;
     module.add_function(wrap_pyfunction!(extract, module)?)?;
     Ok(())

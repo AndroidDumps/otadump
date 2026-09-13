@@ -103,6 +103,42 @@ otadump.extract(
 The optional keyword arguments are `num_threads`, `overwrite`, `partitions`,
 and `verify`. Extraction releases the Python GIL.
 
+Incremental OTAs are supported on Linux x86_64 by passing `source_dir`, which
+contains the old partition images. This additive path uses LineageOS's static,
+partition-parallel `ota_extractor`; full OTAs and the CLI continue to use the
+original Rust implementation. `timeout` limits the external extractor runtime.
+Outputs are reconstructed in a staging directory and published only after the
+process succeeds and every requested partition is present.
+
+```python
+otadump.extract(
+    "incremental-ota.zip",
+    "output",
+    source_dir="old-images",
+    partitions=["boot", "vendor_boot"],
+    timeout=300,
+)
+```
+
+The runtime is downloaded once into `$XDG_CACHE_HOME/otadump` (or
+`~/.cache/otadump`) and locked during installation. Set `OTADUMP_CACHE_DIR` to
+override that location.
+
+### Incremental backend provenance
+
+- Repository: `LineageOS/android_prebuilts_extract-tools`
+- Commit: `a8aabbbe42bdecba4c6d1a9e6e71fbc47de59f96`
+- Commit signature: unsigned (GitHub verification status)
+- Path: `linux-x86/bin/ota_extractor`
+- SHA-256: `7cf65d6c557cc6e761082e88aa225123d445be26dd1a18f618f87c142afaff8c`
+- Size: 20,650,520 bytes
+
+The immutable hash is the trust anchor despite the unsigned upstream commit.
+This newer partition-parallel build was selected after the Pong incremental OTA
+benchmark measured approximately 1.8x lower wall time and 12x lower peak RSS
+than the in-process Rust delta implementation. See
+`python/otadump/THIRD_PARTY_NOTICES.md` for linked-component notices.
+
 ## Contributors
 
 - [Kartik Sharma][crazystylus]

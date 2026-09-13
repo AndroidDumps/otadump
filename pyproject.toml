@@ -20,3 +20,7 @@ classifiers = [
 
 [tool.maturin]
 features = ["python"]
+module-name = "otadump._native"
+python-source = "python"
+include = ["python/otadump/_artifact_lock.json", "python/otadump/THIRD_PARTY_NOTICES.md"]
+exclude = ["python/**/__pycache__/**", "python/**/*.pyc"]
